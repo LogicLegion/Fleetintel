@@ -54,7 +54,6 @@ HTML_TEMPLATE = """
         }
         .container { max-width: 1440px; margin: 0 auto; }
 
-        /* ---- HERO ---- */
         .hero-header {
             background: linear-gradient(145deg, #0f2b4a 0%, #1a3a60 50%, #0f2b4a 100%);
             border-radius: 40px;
@@ -134,7 +133,6 @@ HTML_TEMPLATE = """
         }
         .hero-btn.primary:hover { background: linear-gradient(135deg, #f5c947, #f0b90b); }
 
-        /* ---- UPLOAD CARD ---- */
         .upload-card {
             max-width: 900px;
             margin: 0 auto 2.5rem auto;
@@ -202,7 +200,6 @@ HTML_TEMPLATE = """
         .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: #e2e8f0; }
         #fileStatus { margin-top: 12px; color: #475569; font-weight: 500; }
 
-        /* ---- DASHBOARD ---- */
         #dashboard { display: none; }
         #dataTimestamp {
             background: #e8edf5;
@@ -215,7 +212,6 @@ HTML_TEMPLATE = """
             font-size: 0.9rem;
         }
 
-        /* ---- KPI GRID ---- */
         .kpi-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -246,7 +242,6 @@ HTML_TEMPLATE = """
         .kpi-blue { color: #2563eb; }
         .kpi-yellow { color: #f59e0b; }
 
-        /* ---- FILTERS ---- */
         .filters {
             display: flex;
             flex-wrap: wrap;
@@ -285,7 +280,6 @@ HTML_TEMPLATE = """
         .reset-btn { background: #f1f5f9; color: #1e293b; border: 1px solid #e2e8f0; }
         .reset-btn:hover { background: #e2e8f0; }
 
-        /* ---- TABLE ---- */
         .table-wrapper {
             background: white;
             border-radius: 24px;
@@ -328,7 +322,6 @@ HTML_TEMPLATE = """
         .badge-good { background: #dcfce7; color: #10b981; }
         .badge-offline { background: #e2e8f0; color: #6b7280; }
 
-        /* ---- MAP ---- */
         .map-container {
             background: white;
             border-radius: 24px;
@@ -350,7 +343,6 @@ HTML_TEMPLATE = """
         }
         .map-legend-dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 
-        /* ---- DEMO MODAL ---- */
         #demoModal {
             display: none;
             position: fixed;
@@ -426,7 +418,6 @@ HTML_TEMPLATE = """
         }
         .modal-footer button:hover { background: #0f2b4a; }
 
-        /* ---- TOAST ---- */
         .toast {
             position: fixed;
             bottom: 30px;
@@ -442,7 +433,6 @@ HTML_TEMPLATE = """
             box-shadow: 0 8px 24px rgba(0,0,0,0.2);
         }
 
-        /* ---- RESPONSIVE ---- */
         @media (max-width: 768px) {
             .hero-header { flex-direction: column; text-align: center; padding: 1.5rem; }
             .kpi-grid { grid-template-columns: repeat(2, 1fr); }
@@ -458,7 +448,6 @@ HTML_TEMPLATE = """
 
 <div class="container">
 
-    <!-- HERO HEADER -->
     <div class="hero-header">
         <div class="hero-left">
             <h1><i class="fas fa-chart-line"></i> Fleet Intelligence <span class="live-pulse">LIVE</span></h1>
@@ -473,7 +462,6 @@ HTML_TEMPLATE = """
 
     <input type="file" id="csvFile" accept=".csv" style="display:none;">
 
-    <!-- UPLOAD CARD -->
     <div class="upload-card" id="uploadCard">
         <h2><i class="fas fa-cloud-upload-alt" style="color:#1e3a5f;"></i> Upload Your Fleet Data</h2>
         <p>Upload a CSV file with your asset data</p>
@@ -497,11 +485,9 @@ HTML_TEMPLATE = """
         <div id="fileStatus"></div>
     </div>
 
-    <!-- DASHBOARD -->
     <div id="dashboard">
         <div id="dataTimestamp"></div>
 
-        <!-- KPI Grid -->
         <div class="kpi-grid" id="kpiGrid">
             <div class="kpi-card"><div class="kpi-label">📊 Total Assets</div><div class="kpi-value kpi-blue" id="kpiTotal">0</div></div>
             <div class="kpi-card"><div class="kpi-label">🔴 Critical</div><div class="kpi-value" id="kpiCritical" style="color:#dc2626;">0</div></div>
@@ -509,7 +495,6 @@ HTML_TEMPLATE = """
             <div class="kpi-card"><div class="kpi-label">💸 Daily Loss</div><div class="kpi-value kpi-loss" id="kpiLoss">$0</div></div>
         </div>
 
-        <!-- Filters -->
         <div class="filters">
             <div class="filter-group"><label>Region</label><select id="regionFilter"><option value="all">All</option></select></div>
             <div class="filter-group"><label>Status</label><select id="statusFilter"><option value="all">All</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="good">Good</option><option value="offline">Offline</option></select></div>
@@ -517,7 +502,6 @@ HTML_TEMPLATE = """
             <button id="resetBtn" class="reset-btn"><i class="fas fa-undo"></i> Reset</button>
         </div>
 
-        <!-- Table -->
         <div class="table-wrapper">
             <table id="dataTable">
                 <thead><tr><th>Asset</th><th>Address</th><th>City</th><th>Region</th><th>Status</th><th>Volume</th><th>Reject%</th><th>Uptime%</th><th>Est. Revenue</th><th>Daily Loss</th><th>Service Days</th><th>Call</th></tr></thead>
@@ -525,7 +509,6 @@ HTML_TEMPLATE = """
             </table>
         </div>
 
-        <!-- Map -->
         <div class="map-container">
             <h3><i class="fas fa-map-pin" style="color:#1e3a5f;"></i> Asset Location Map</h3>
             <div id="map"></div>
@@ -539,7 +522,6 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
-<!-- ===== DEMO MODAL ===== -->
 <div id="demoModal">
     <div class="modal-content">
         <button class="modal-close" onclick="closeDemo()">✕</button>
@@ -548,11 +530,11 @@ HTML_TEMPLATE = """
 
         <div class="screenshot-grid">
             <div class="screenshot-item">
-                <img src="Fleetintel0.png" alt="Dashboard screenshot 1 - KPI Cards and Table View">
+                <img src="https://raw.githubusercontent.com/LogicLegion/Fleetintel/main/Fleetintel0.png" alt="Dashboard screenshot 1">
                 <div class="caption">📊 KPI Cards &amp; Table View</div>
             </div>
             <div class="screenshot-item">
-                <img src="Fleetintel1.png" alt="Dashboard screenshot 2 - Map View with Color-Coded Markers">
+                <img src="https://raw.githubusercontent.com/LogicLegion/Fleetintel/main/Fleetintel1.png" alt="Dashboard screenshot 2">
                 <div class="caption">🗺️ Map View with Color-Coded Markers</div>
             </div>
         </div>
@@ -566,17 +548,11 @@ HTML_TEMPLATE = """
 <div id="toast" class="toast"></div>
 
 <script>
-    // ============================================================
-    // FLEET INTELLIGENCE DASHBOARD — WITH SAMPLE DATA & DEMO MODAL
-    // ============================================================
-
     let allData = [];
     let currentSort = { column: 'loss', direction: 'desc' };
     let map = null;
-
     const TRANSACTION_VALUE = 5;
 
-    // ===== HELPERS =====
     function showToast(msg) {
         let t = document.getElementById('toast');
         t.textContent = msg;
@@ -634,7 +610,6 @@ HTML_TEMPLATE = """
     function getPhoneNumber(r) { return r.Phone || r['Store Phone Number'] || ''; }
     function escapeHtml(s) { if (!s) return ''; return s.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[m]); }
 
-    // ===== PARSE CSV =====
     function parseCSV(text) {
         const lines = text.split(/\\r?\\n/);
         if (lines.length < 2) return false;
@@ -673,7 +648,6 @@ HTML_TEMPLATE = """
         return true;
     }
 
-    // ===== FILTERS & SORT =====
     function filterData() {
         let f = [...allData];
         let region = document.getElementById('regionFilter')?.value || 'all';
@@ -696,7 +670,6 @@ HTML_TEMPLATE = """
         });
     }
 
-    // ===== RENDER =====
     function renderAll() {
         if (!allData.length) return;
         let f = filterData();
@@ -747,7 +720,6 @@ HTML_TEMPLATE = """
         populateFilters();
     }
 
-    // ===== MAP =====
     function updateMap(data) {
         if (map) map.remove();
         map = L.map('map').setView([56.1304, -106.3468], 4);
@@ -770,7 +742,6 @@ HTML_TEMPLATE = """
         setTimeout(() => map.invalidateSize(), 100);
     }
 
-    // ===== FILTERS SETUP =====
     function populateFilters() {
         if (!allData.length) return;
         const regions = [...new Set(allData.map(r => getRegion(r)))].filter(r => r && r !== 'Unknown');
@@ -780,7 +751,6 @@ HTML_TEMPLATE = """
         if ([...sel.options].some(o => o.value === current)) sel.value = current;
     }
 
-    // ===== SCREENSHOT & REPORT =====
     function takeScreenshot() {
         if (!allData.length) return showToast('No data');
         showToast('Capturing...');
@@ -805,9 +775,6 @@ HTML_TEMPLATE = """
         }).catch(() => showToast('Failed'));
     }
 
-    // ============================================================
-    // MODAL FUNCTIONS
-    // ============================================================
     function openDemo() {
         document.getElementById('demoModal').style.display = 'flex';
         document.body.style.overflow = 'hidden';
@@ -818,13 +785,8 @@ HTML_TEMPLATE = """
         document.body.style.overflow = 'auto';
     }
 
-    // ============================================================
-    // EVENT LISTENERS
-    // ============================================================
-
     document.addEventListener('DOMContentLoaded', function() {
 
-        // ---- Demo Modal ----
         document.getElementById('viewDemoBtn').addEventListener('click', openDemo);
         document.getElementById('demoModal').addEventListener('click', function(e) {
             if (e.target === this) closeDemo();
@@ -833,11 +795,9 @@ HTML_TEMPLATE = """
             if (e.key === 'Escape') closeDemo();
         });
 
-        // ---- Upload buttons ----
         document.getElementById('uploadBtn').addEventListener('click', () => document.getElementById('csvFile').click());
         document.getElementById('uploadBtn2').addEventListener('click', () => document.getElementById('csvFile').click());
 
-        // ---- File upload ----
         document.getElementById('csvFile').addEventListener('change', function(e) {
             if (!e.target.files || !e.target.files[0]) return;
             const file = e.target.files[0];
@@ -857,7 +817,6 @@ HTML_TEMPLATE = """
             reader.readAsText(file);
         });
 
-        // ---- Load Sample Data ----
         document.getElementById('loadSampleBtn').addEventListener('click', function() {
             fetch('/load-sample')
                 .then(response => response.text())
@@ -876,7 +835,6 @@ HTML_TEMPLATE = """
                 .catch(() => showToast('Error loading sample data'));
         });
 
-        // ---- Reset ----
         document.getElementById('resetBtn').addEventListener('click', function() {
             document.getElementById('regionFilter').value = 'all';
             document.getElementById('statusFilter').value = 'all';
@@ -884,12 +842,10 @@ HTML_TEMPLATE = """
             renderAll();
         });
 
-        // ---- Live filters ----
         document.getElementById('searchInput').addEventListener('input', renderAll);
         document.getElementById('regionFilter').addEventListener('change', renderAll);
         document.getElementById('statusFilter').addEventListener('change', renderAll);
 
-        // ---- Screenshot & Report ----
         document.getElementById('screenshotBtn').addEventListener('click', takeScreenshot);
         document.getElementById('reportBtn').addEventListener('click', downloadReport);
 
