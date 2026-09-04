@@ -2,22 +2,17 @@
 
 > Real-time asset performance & predictive analytics for vending machines, ATMs, laundry machines, EV chargers, and more.
 
-![Fleet Intelligence Dashboard](screenshot.png)
+## 📸 Screenshots
 
----
+### Dashboard View
+![Dashboard View](Fleetintel0.png)
+
+### Map View
+![Map View](Fleetintel1.png)
 
 ## 🚀 Overview
 
-Fleet Intelligence Dashboard is a **standalone web application** that helps businesses monitor their machines and identify exactly which assets are losing money. Upload a CSV, get a live dashboard with:
-
-- 📊 **12 key metrics** — volume, reject rate, uptime, daily loss, and more
-- 🗺️ **Live map** — see all assets color-coded by status
-- 🔍 **Filters & search** — find what you need in seconds
-- 💰 **Daily loss calculator** — see exactly how much each machine is losing
-- 📞 **One-click call** — contact technicians directly
-- 📸 **Export reports** — download screenshots or full reports
-
----
+Fleet Intelligence Dashboard is a **standalone web application** that helps businesses monitor their machines and identify exactly which assets are losing money.
 
 ## 📦 Features
 
@@ -30,9 +25,6 @@ Fleet Intelligence Dashboard is a **standalone web application** that helps busi
 | **Filters** | Region, status, and search |
 | **Screenshot** | Save dashboard as PNG |
 | **Report Export** | Full dashboard export as PNG |
-| **Mobile Responsive** | Works on desktop, tablet, and phone |
-
----
 
 ## 🛠️ Tech Stack
 
@@ -46,6 +38,10 @@ Fleet Intelligence Dashboard is a **standalone web application** that helps busi
 | **Backend** | Python, Flask |
 | **Hosting** | Render / Netlify |
 
----
+## 🔧 Installation
 
-## 📁 Project Structure
+### 1. Clone the repository
+
+```bash
+git clone https://github.com/yourusername/fleet-intelligence-dashboard.git
+cd fleet-intelligence-dashboard
