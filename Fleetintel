@@ -1,9 +1,54 @@
-from flask import Flask
+from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from flask_bcrypt import Bcrypt
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 import os
+import base64
+import io
+import PyPDF2
+import json
+import time
+from datetime import datetime
+import markdown
+import bleach
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'dev-key-change-me')
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///users.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# ===== SAMPLE CSV DATA (EXACT HEADERS — FIXED) =====
+db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+login_manager = LoginManager(app)
+login_manager.login_view = 'login'
+login_manager.login_message = 'Please log in to access the dashboard.'
+
+YOUR_API_KEY = os.getenv('OPENROUTER_API_KEY')
+BOT_NAME = 'FleetIntel'
+
+# ===== USER MODEL =====
+class User(db.Model, UserMixin):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
+
+# ===== CREATE TABLES =====
+with app.app_context():
+    db.create_all()
+
+# ============================================================
+# SAMPLE CSV DATA
+# ============================================================
 SAMPLE_CSV = """Store,Address,City,Province,1 Day TX,7 Day Reject %,7 Day Uptime %,Last PM Date,Latitude,Longitude,Phone
 Super C 5917,2125 bl Roland-Therrien,Longueuil,QC,4,1.4,57.1,2026-01-15,45.53,-73.51,450-555-0199
 Loblaws 1051,1980 Ogilvie Rd.,Gloucester,ON,4,4.1,73.0,2026-02-01,45.45,-75.65,613-555-0153
@@ -29,10 +74,234 @@ Maxi 8635,355 Rue Principale,Lachute,QC,6,3.9,72.4,2026-01-12,45.65,-74.38,450-5
 Food Basics 843,1070 Majr Mackenzie Dr E,Richmond Hill,ON,6,9.8,98.0,2026-02-07,43.88,-79.44,905-555-0266
 Metro 135,400 Bayfield St,Barrie,ON,8,7.2,99.9,2026-02-11,44.39,-79.69,705-555-0277
 Food Basics 904,227 Vodden Street,Brampton,ON,12,2.6,99.9,2026-02-14,43.70,-79.76,905-555-0288
-Metro 800,40 Eglinton Square,Scarborough,ON,10,2.5,99.9,2026-02-19,43.73,-79.28,416-555-0299
+Metro 800,40 Eglinton Square,Scarborough,ON,10,2.5,99.9,2026-02-19,43.73,-79.28,416-555-0299"""
+
+# ============================================================
+# HTML TEMPLATES
+# ============================================================
+
+LOGIN_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FleetIntel — Login</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #f0f4fb;
+            padding: 20px;
+        }
+        .login-card {
+            background: white;
+            border-radius: 32px;
+            padding: 48px 40px;
+            max-width: 420px;
+            width: 100%;
+            box-shadow: 0 20px 45px -12px rgba(0,0,0,0.08);
+            border: 1px solid #e9edf2;
+            text-align: center;
+        }
+        .login-card h1 {
+            font-size: 28px;
+            font-weight: 800;
+            color: #0a1a2b;
+        }
+        .login-card h1 span {
+            color: #1e3a5f;
+        }
+        .login-card .sub {
+            color: #64748b;
+            font-size: 14px;
+            margin: 8px 0 24px 0;
+        }
+        .login-card input {
+            width: 100%;
+            padding: 14px 16px;
+            border: 1px solid #e2e8f0;
+            border-radius: 14px;
+            font-size: 15px;
+            margin-bottom: 12px;
+            transition: 0.2s;
+        }
+        .login-card input:focus {
+            outline: none;
+            border-color: #1e3a5f;
+            box-shadow: 0 0 0 3px rgba(30, 58, 95, 0.1);
+        }
+        .login-card button {
+            width: 100%;
+            padding: 14px;
+            background: #1e3a5f;
+            color: white;
+            border: none;
+            border-radius: 14px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .login-card button:hover { background: #0f2b4a; }
+        .login-card .footer-text {
+            margin-top: 16px;
+            font-size: 14px;
+            color: #64748b;
+        }
+        .login-card .footer-text a {
+            color: #1e3a5f;
+            font-weight: 600;
+            text-decoration: none;
+        }
+        .login-card .footer-text a:hover { text-decoration: underline; }
+        .error {
+            color: #dc2626;
+            font-size: 14px;
+            margin-bottom: 12px;
+            background: #fef2f2;
+            padding: 8px;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <h1>📊 <span>FleetIntel</span></h1>
+        <p class="sub">Sign in to your account</p>
+        {% if error %}
+            <div class="error">{{ error }}</div>
+        {% endif %}
+        <form method="POST">
+            <input type="text" name="username" placeholder="Username" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">Sign In</button>
+        </form>
+        <p class="footer-text">
+            Don't have an account? <a href="{{ url_for('register') }}">Register</a>
+        </p>
+    </div>
+</body>
+</html>
 """
 
-HTML_TEMPLATE = """
+REGISTER_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FleetIntel — Register</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #f0f4fb;
+            padding: 20px;
+        }
+        .register-card {
+            background: white;
+            border-radius: 32px;
+            padding: 48px 40px;
+            max-width: 420px;
+            width: 100%;
+            box-shadow: 0 20px 45px -12px rgba(0,0,0,0.08);
+            border: 1px solid #e9edf2;
+            text-align: center;
+        }
+        .register-card h1 {
+            font-size: 28px;
+            font-weight: 800;
+            color: #0a1a2b;
+        }
+        .register-card h1 span {
+            color: #1e3a5f;
+        }
+        .register-card .sub {
+            color: #64748b;
+            font-size: 14px;
+            margin: 8px 0 24px 0;
+        }
+        .register-card input {
+            width: 100%;
+            padding: 14px 16px;
+            border: 1px solid #e2e8f0;
+            border-radius: 14px;
+            font-size: 15px;
+            margin-bottom: 12px;
+            transition: 0.2s;
+        }
+        .register-card input:focus {
+            outline: none;
+            border-color: #1e3a5f;
+            box-shadow: 0 0 0 3px rgba(30, 58, 95, 0.1);
+        }
+        .register-card button {
+            width: 100%;
+            padding: 14px;
+            background: #1e3a5f;
+            color: white;
+            border: none;
+            border-radius: 14px;
+            font-size: 16px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: 0.2s;
+        }
+        .register-card button:hover { background: #0f2b4a; }
+        .register-card .footer-text {
+            margin-top: 16px;
+            font-size: 14px;
+            color: #64748b;
+        }
+        .register-card .footer-text a {
+            color: #1e3a5f;
+            font-weight: 600;
+            text-decoration: none;
+        }
+        .register-card .footer-text a:hover { text-decoration: underline; }
+        .error {
+            color: #dc2626;
+            font-size: 14px;
+            margin-bottom: 12px;
+            background: #fef2f2;
+            padding: 8px;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="register-card">
+        <h1>📊 <span>FleetIntel</span></h1>
+        <p class="sub">Create your account</p>
+        {% if error %}
+            <div class="error">{{ error }}</div>
+        {% endif %}
+        <form method="POST">
+            <input type="text" name="username" placeholder="Username" required>
+            <input type="email" name="email" placeholder="Email" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">Create Account</button>
+        </form>
+        <p class="footer-text">
+            Already have an account? <a href="{{ url_for('login') }}">Sign In</a>
+        </p>
+    </div>
+</body>
+</html>
+"""
+
+DASHBOARD_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -53,7 +322,6 @@ HTML_TEMPLATE = """
             color: #0a1a2b;
         }
         .container { max-width: 1440px; margin: 0 auto; }
-
         .hero-header {
             background: linear-gradient(145deg, #0f2b4a 0%, #1a3a60 50%, #0f2b4a 100%);
             border-radius: 40px;
@@ -132,7 +400,11 @@ HTML_TEMPLATE = """
             font-weight: 700;
         }
         .hero-btn.primary:hover { background: linear-gradient(135deg, #f5c947, #f0b90b); }
-
+        .hero-btn.outline {
+            background: transparent;
+            border: 1px solid rgba(255,255,255,0.3);
+        }
+        .hero-btn.outline:hover { background: rgba(255,255,255,0.1); }
         .upload-card {
             max-width: 900px;
             margin: 0 auto 2.5rem auto;
@@ -199,7 +471,6 @@ HTML_TEMPLATE = """
         .divider { display: flex; align-items: center; gap: 16px; margin: 16px 0; color: #94a3b8; font-size: 0.85rem; }
         .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: #e2e8f0; }
         #fileStatus { margin-top: 12px; color: #475569; font-weight: 500; }
-
         #dashboard { display: none; }
         #dataTimestamp {
             background: #e8edf5;
@@ -211,7 +482,6 @@ HTML_TEMPLATE = """
             color: #1e3a5f;
             font-size: 0.9rem;
         }
-
         .kpi-grid {
             display: grid;
             grid-template-columns: repeat(4, 1fr);
@@ -241,7 +511,6 @@ HTML_TEMPLATE = """
         .kpi-green { color: #10b981; }
         .kpi-blue { color: #2563eb; }
         .kpi-yellow { color: #f59e0b; }
-
         .filters {
             display: flex;
             flex-wrap: wrap;
@@ -279,7 +548,6 @@ HTML_TEMPLATE = """
         button:hover { background: #0f2b4a; transform: translateY(-1px); }
         .reset-btn { background: #f1f5f9; color: #1e293b; border: 1px solid #e2e8f0; }
         .reset-btn:hover { background: #e2e8f0; }
-
         .table-wrapper {
             background: white;
             border-radius: 24px;
@@ -321,7 +589,6 @@ HTML_TEMPLATE = """
         .badge-warning { background: #fef3c7; color: #f59e0b; }
         .badge-good { background: #dcfce7; color: #10b981; }
         .badge-offline { background: #e2e8f0; color: #6b7280; }
-
         .map-container {
             background: white;
             border-radius: 24px;
@@ -342,7 +609,6 @@ HTML_TEMPLATE = """
             flex-wrap: wrap;
         }
         .map-legend-dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
-
         #demoModal {
             display: none;
             position: fixed;
@@ -417,7 +683,6 @@ HTML_TEMPLATE = """
             transition: 0.2s;
         }
         .modal-footer button:hover { background: #0f2b4a; }
-
         .toast {
             position: fixed;
             bottom: 30px;
@@ -432,7 +697,6 @@ HTML_TEMPLATE = """
             display: none;
             box-shadow: 0 8px 24px rgba(0,0,0,0.2);
         }
-
         @media (max-width: 768px) {
             .hero-header { flex-direction: column; text-align: center; padding: 1.5rem; }
             .kpi-grid { grid-template-columns: repeat(2, 1fr); }
@@ -448,20 +712,24 @@ HTML_TEMPLATE = """
 
 <div class="container">
 
+    <!-- HERO HEADER -->
     <div class="hero-header">
         <div class="hero-left">
             <h1><i class="fas fa-chart-line"></i> Fleet Intelligence <span class="live-pulse">LIVE</span></h1>
             <div class="subtitle">Real-time asset performance &amp; predictive analytics</div>
         </div>
         <div class="hero-right">
+            <span style="color:#b0c8e5;font-size:14px;">👤 {{ current_user.username }}</span>
             <button class="hero-btn" id="uploadBtn"><i class="fas fa-upload"></i> Upload CSV</button>
             <button class="hero-btn primary" id="screenshotBtn"><i class="fas fa-camera"></i> Screenshot</button>
             <button class="hero-btn primary" id="reportBtn"><i class="fas fa-file-pdf"></i> Report</button>
+            <a href="{{ url_for('logout') }}" class="hero-btn outline"><i class="fas fa-sign-out-alt"></i> Logout</a>
         </div>
     </div>
 
     <input type="file" id="csvFile" accept=".csv" style="display:none;">
 
+    <!-- UPLOAD CARD -->
     <div class="upload-card" id="uploadCard">
         <h2><i class="fas fa-cloud-upload-alt" style="color:#1e3a5f;"></i> Upload Your Fleet Data</h2>
         <p>Upload a CSV file with your asset data</p>
@@ -485,9 +753,11 @@ HTML_TEMPLATE = """
         <div id="fileStatus"></div>
     </div>
 
+    <!-- DASHBOARD -->
     <div id="dashboard">
         <div id="dataTimestamp"></div>
 
+        <!-- KPI Grid -->
         <div class="kpi-grid" id="kpiGrid">
             <div class="kpi-card"><div class="kpi-label">📊 Total Assets</div><div class="kpi-value kpi-blue" id="kpiTotal">0</div></div>
             <div class="kpi-card"><div class="kpi-label">🔴 Critical</div><div class="kpi-value" id="kpiCritical" style="color:#dc2626;">0</div></div>
@@ -495,6 +765,7 @@ HTML_TEMPLATE = """
             <div class="kpi-card"><div class="kpi-label">💸 Daily Loss</div><div class="kpi-value kpi-loss" id="kpiLoss">$0</div></div>
         </div>
 
+        <!-- Filters -->
         <div class="filters">
             <div class="filter-group"><label>Region</label><select id="regionFilter"><option value="all">All</option></select></div>
             <div class="filter-group"><label>Status</label><select id="statusFilter"><option value="all">All</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="good">Good</option><option value="offline">Offline</option></select></div>
@@ -502,6 +773,7 @@ HTML_TEMPLATE = """
             <button id="resetBtn" class="reset-btn"><i class="fas fa-undo"></i> Reset</button>
         </div>
 
+        <!-- Table -->
         <div class="table-wrapper">
             <table id="dataTable">
                 <thead><tr><th>Asset</th><th>Address</th><th>City</th><th>Region</th><th>Status</th><th>Volume</th><th>Reject%</th><th>Uptime%</th><th>Est. Revenue</th><th>Daily Loss</th><th>Service Days</th><th>Call</th></tr></thead>
@@ -509,6 +781,7 @@ HTML_TEMPLATE = """
             </table>
         </div>
 
+        <!-- Map -->
         <div class="map-container">
             <h3><i class="fas fa-map-pin" style="color:#1e3a5f;"></i> Asset Location Map</h3>
             <div id="map"></div>
@@ -522,6 +795,7 @@ HTML_TEMPLATE = """
     </div>
 </div>
 
+<!-- DEMO MODAL -->
 <div id="demoModal">
     <div class="modal-content">
         <button class="modal-close" onclick="closeDemo()">✕</button>
@@ -856,16 +1130,58 @@ HTML_TEMPLATE = """
 </html>
 """
 
+# ============================================================
+# ROUTES
+# ============================================================
 
-@app.route('/')
-def home():
-    return HTML_TEMPLATE
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        user = User.query.filter_by(username=username).first()
+        if user and bcrypt.check_password_hash(user.password, password):
+            login_user(user)
+            return redirect(url_for('dashboard'))
+        return render_template_string(LOGIN_TEMPLATE, error="Invalid username or password")
+    return render_template_string(LOGIN_TEMPLATE, error=None)
 
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        existing = User.query.filter_by(username=username).first()
+        if existing:
+            return render_template_string(REGISTER_TEMPLATE, error="Username already taken")
+        hashed = bcrypt.generate_password_hash(password).decode('utf-8')
+        new_user = User(username=username, email=email, password=hashed)
+        db.session.add(new_user)
+        db.session.commit()
+        login_user(new_user)
+        return redirect(url_for('dashboard'))
+    return render_template_string(REGISTER_TEMPLATE, error=None)
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('login'))
+
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    return render_template_string(DASHBOARD_TEMPLATE)
 
 @app.route('/load-sample')
+@login_required
 def load_sample():
     return SAMPLE_CSV
 
+@app.route('/ping')
+def ping():
+    return jsonify({'status': 'ok', 'bot_name': BOT_NAME})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000)
+    app.run(host='0.0.0.0', port=os.getenv('PORT', 5000), debug=False)
