@@ -1,0 +1,10 @@
+flask
+flask-sqlalchemy
+flask-bcrypt
+flask-login
+gunicorn
+requests
+markdown
+bleach
+PyPDF2
+python-dotenv
