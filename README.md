@@ -7,10 +7,10 @@
 ## 📸 Screenshots
 
 ### Dashboard View
-![Dashboard View](https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO_NAME/main/Fleetintel0.png)
+![Dashboard View](https://raw.githubusercontent.com/LogicLegion/Fleetintel/main/Fleetintel0.png)
 
 ### Map View
-![Map View](https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO_NAME/main/Fleetintel1.png)
+![Map View](https://raw.githubusercontent.com/LogicLegion/Fleetintel/main/Fleetintel1.png)
 
 ---
 
@@ -53,5 +53,5 @@ Fleet Intelligence Dashboard is a **standalone web application** that helps busi
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/fleet-intelligence-dashboard.git
-cd fleet-intelligence-dashboard
+git clone https://github.com/LogicLegion/Fleetintel.git
+cd Fleetintel
