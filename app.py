@@ -164,7 +164,11 @@ LANDING_TEMPLATE = """
             </div>
         </div>
         <div class="footer">
-            <p>&copy; 2026 FleetIntel. Built with ❤️ in Canada. <a href="mailto:your-email@example.com">Contact</a></p>
+            <p>&copy; 2026 FleetIntel. Built with ❤️ in Canada.</p>
+            <p>
+                <a href="mailto:jjaaluk@gmail.com">✉️ Contact</a> ·
+                <a href="https://fleetintel.onrender.com" target="_blank">Live Demo</a>
+            </p>
         </div>
     </div>
 </body>
