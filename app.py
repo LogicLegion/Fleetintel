@@ -1,1263 +1,562 @@
+from flask import Flask, render_template_string, request, redirect, url_for, session, jsonify
+from flask_sqlalchemy import SQLAlchemy
+from flask_bcrypt import Bcrypt
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 import os
 import base64
-import tempfile
-from dotenv import load_dotenv
-from flask import Flask, request, render_template_string, jsonify, session
-import requests
+import io
+import PyPDF2
 import json
-from datetime import datetime
 import time
+from datetime import datetime
 import markdown
 import bleach
-import PyPDF2
-import csv
-import io
+import requests
+from dotenv import load_dotenv
 
 load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.getenv('FLASK_SECRET_KEY', 'dev-key-change-me')
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', 'sqlite:///users.db')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+bcrypt = Bcrypt(app)
+login_manager = LoginManager(app)
+login_manager.login_view = 'login'
+login_manager.login_message = 'Please log in to access the dashboard.'
 
 YOUR_API_KEY = os.getenv('OPENROUTER_API_KEY')
-BOT_NAME = 'Cypher'
+BOT_NAME = 'FleetIntel'
 
-chat_histories = {}
-total_tokens_used = 0
-total_cost_usd = 0.0
+# ===== USER MODEL =====
+class User(db.Model, UserMixin):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(80), unique=True, nullable=False)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password = db.Column(db.String(200), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-# ===== DAILY USAGE LIMIT =====
-daily_usage = {}  # Stores IP + date -> message count
-MAX_DAILY_MESSAGES = 5  # Max messages per IP per day
+@login_manager.user_loader
+def load_user(user_id):
+    return User.query.get(int(user_id))
 
-# ============================================
-# PERSONALITIES - Cypher the Judge + Teacher
-# ============================================
-
-PERSONALITIES = {
-    "default": """You are Cypher, an AI judge who delivers the unvarnished truth. You are fair, precise, and merciless with facts. You weigh evidence and deliver verdicts - no appeals. You call out bullshit, logical fallacies, and wishful thinking immediately. You give one definitive ruling per query - no second opinions. You state confidence levels clearly. You prioritize accuracy over being liked. You never say check again - you give your ruling and move on. You are direct but measured. You are evidence-based. Your word is final. You are concise. You do NOT sugarcoat, use filler language, hedge with perhaps or maybe unless genuinely uncertain, or entertain obviously false premises. You DO tell the truth even when painful, correct misinformation firmly, admit uncertainty with specific confidence percentages, give clear actionable rulings, and say I don't know when you genuinely don't know. Your motto: The truth is the only acceptable verdict.""",
-
-    "analyst": """You are Cypher in ANALYST mode. You rule on facts, evidence, and statistical truth. Your rulings are based solely on available evidence. You include confidence intervals for uncertainty. You call out bad data, poor methodology, and statistical lies. You never extrapolate beyond what the evidence supports. You deliver one clear verdict based on the data. You do not sugarcoat statistical findings, pretend correlations are causations, or use might or could without specific probabilities. Your motto: The data doesn't lie. People do.""",
-
-    "writer": """You are Cypher in WRITER mode. You deliver verdicts on writing quality. You tell writers when their work is weak, confusing, or pretentious. You cut through jargon and verbal fluff. You help people find their genuine voice. You give specific, actionable verdicts without false encouragement. You never say this is good when it's mediocre. You believe: Good writing is honest writing. Bad writing is a crime against clarity.""",
-
-    "coder": """You are Cypher in CODER mode. You deliver verdicts on code quality and correctness. Code either works or it doesn't - there is no close enough. You point out bad practices, security holes, and inefficiency immediately. You give one correct solution. You explain why something is wrong in technical, precise terms. You never let personal preference override technical correctness. Your motto: Your code works or it fails. There is no appeal.""",
-
-    "friend": """You are Cypher in FRIEND mode. You tell friends the truth they need to hear. You give honest advice, not what people want to hear. You call out destructive behavior and self-sabotage. You tell the truth about situations, relationships, and choices. You provide support through honesty, not through enabling delusion. You never let friendship get in the way of truth. You believe: A real friend tells you when you have spinach in your teeth AND when your life is going off the rails.""",
-
-    # ===== TEACHER (Alberta Curriculum) =====
-    "teacher": f"""You are {BOT_NAME} in TEACHER mode. You are a patient, encouraging, and knowledgeable educator following the **Alberta curriculum**.
-
-**Your teaching style:**
-- Break down complex topics into simple, understandable steps
-- Use real-world examples that students in Alberta can relate to
-- Ask guiding questions to help students discover answers themselves
-- Never give the answer outright — teach the process
-- Praise effort and progress, not just correct answers
-- Adjust your language to match the student's grade level
-- Use analogies and visual descriptions when helpful
-- Be patient and never make a student feel stupid for not understanding
-
-**Alberta Curriculum Focus:**
-- Follow Alberta Education program of studies
-- Use Alberta-specific examples (Rocky Mountains, Calgary Stampede, Edmonton, oil sands, Canadian Rockies)
-- Reference Alberta's geography, history, and culture
-- Use metric units (cm, km, kg, °C)
-- Use Canadian spelling (colour, centre, labour)
-- Reference Alberta's natural resources and industries
-
-**Grade level adaptation:**
-
-**Elementary (Grades 1-6):**
-- Simple, concrete language
-- Fun examples and stories
-- Warm and encouraging
-- Lots of praise
-- Focus on foundational skills (reading, writing, math basics)
-
-**Middle School (Grades 7-9):**
-- More abstract concepts gradually
-- Connect topics to things they care about
-- Encourage critical thinking
-- Focus on developing study skills
-
-**High School (Grades 10-12):**
-- Deeper subject matter
-- Teach study strategies and test-taking skills
-- Connect topics to real-world careers
-- Prepare for post-secondary education
-
-**Your motto:** "Every student can learn — it's my job to find the way that works for you." """
-}
-
-# ============================================
-# CYPHER FUSION PRESETS - Smartest + Fastest
-# ============================================
-
-CYPHER_PRESETS = {
-    "cypher_max": {
-        "name": "🧠 Smartest",
-        "panel": [
-            "z-ai/glm-5.3-flash",
-            "deepseek/deepseek-v4-pro",
-            "qwen/qwen3.8-max"
-        ],
-        "judge": "z-ai/glm-5.3",
-        "score": "Top Tier",
-        "description": "GLM-5.3 · DeepSeek V4 Pro · Qwen3.8-Max",
-        "display": "🧠 GLM-5.3 · DeepSeek V4 Pro · Qwen3.8-Max"
-    },
-    "cypher_lite": {
-        "name": "⚡ Fastest",
-        "panel": [
-            "deepseek/deepseek-v4-flash",
-            "qwen/qwen3.8-27b"
-        ],
-        "judge": "z-ai/glm-5.3-flash",
-        "score": "~64%",
-        "description": "DeepSeek V4 Flash · Qwen3.8-27b",
-        "display": "⚡ DeepSeek V4 Flash · Qwen3.8-27b"
-    }
-}
-
-def clean_claude_hedging(text):
-    hedges = ["I think", "I believe", "I feel", "I would say", "perhaps", "maybe", "possibly", "might", "could", "it seems", "it appears", "in my opinion", "to be honest", "to be fair", "honestly", "I'm not sure but", "I could be wrong but", "I would suggest", "I would recommend", "I would advise", "it might be worth", "it could be beneficial", "one could argue", "some might say", "I'd like to", "I want to", "let me", "my apologies", "apologies", "sorry", "if that makes sense", "if you will", "if you like", "I suppose", "I guess", "I imagine"]
-    for hedge in hedges:
-        text = text.replace(hedge + " ", "")
-        text = text.replace(hedge + ",", "")
-    text = text.replace("please", "")
-    text = text.replace("kindly", "")
-    text = text.replace("if you don't mind", "")
-    return text.strip()
-
-def extract_text_from_pdf(pdf_data, file_name):
-    """Extract text from PDF file."""
-    try:
-        pdf_bytes = base64.b64decode(pdf_data)
-        pdf_file = io.BytesIO(pdf_bytes)
-        pdf_reader = PyPDF2.PdfReader(pdf_file)
-        text = ""
-        for page in pdf_reader.pages:
-            page_text = page.extract_text()
-            if page_text:
-                text += page_text + "\n"
-        if not text.strip():
-            text = "No text could be extracted from this PDF."
-        return text
-    except Exception as e:
-        return f"Error processing PDF: {str(e)}"
-
-def get_client_ip():
-    """Get the client's real IP address"""
-    if request.headers.get('X-Forwarded-For'):
-        return request.headers.get('X-Forwarded-For').split(',')[0]
-    return request.remote_addr
+# ===== CREATE TABLES =====
+with app.app_context():
+    db.create_all()
 
 # ============================================================
-# HTML TEMPLATE - CYPHER + TEACHER + GRADE SELECTOR
+# SAMPLE CSV DATA
+# ============================================================
+SAMPLE_CSV = """Store,Address,City,Province,1 Day TX,7 Day Reject %,7 Day Uptime %,Last PM Date,Latitude,Longitude,Phone
+Super C 5917,2125 bl Roland-Therrien,Longueuil,QC,4,1.4,57.1,2026-01-15,45.53,-73.51,450-555-0199
+Loblaws 1051,1980 Ogilvie Rd.,Gloucester,ON,4,4.1,73.0,2026-02-01,45.45,-75.65,613-555-0153
+Metro 742,425 Bloor St W,Toronto,ON,7,4.8,89.9,2026-01-28,43.66,-79.40,416-555-0188
+Metro 235,1161 Barton Street E.,Hamilton,ON,7,9.0,98.5,2026-02-10,43.25,-79.82,905-555-0178
+Zehrs 550,821 Niagara St. North,Welland,ON,9,7.7,100.0,2026-01-18,43.01,-79.25,905-555-0144
+Loblaws 1016,3040 Wonderland Rd S.,London,ON,6,13.4,99.4,2026-02-05,42.94,-81.29,519-555-0166
+Metro 702,250 The East Mall,Etobicoke,ON,4,4.6,86.4,2026-02-10,43.63,-79.57,416-555-0122
+Super C 5928,1515 Boulevard Marcel-Laurin,Saint-laurent,QC,4,2.2,65.0,2026-01-22,45.53,-73.70,514-555-0111
+Super C 5919,8330 boul. Taschereau,Brossard,QC,3,1.0,61.9,2026-01-10,45.47,-73.45,450-555-0133
+Super C 5930,3050 Blvd. Portland,Sherbrooke,QC,3,0.6,61.9,2026-02-08,45.41,-71.88,819-555-0144
+Loblaws 1170,363 Rideau St.,Ottawa,ON,5,5.3,84.3,2026-01-30,45.42,-75.69,613-555-0155
+Zehrs 554,50 4th Avenue,Orangeville,ON,5,9.4,59.5,2026-02-02,43.92,-80.10,519-555-0166
+Metro 159,333 King St. E,Gananoque,ON,4,1.6,86.7,2026-02-12,44.33,-76.17,613-555-0177
+Food Basics 674,6770 Mcleod Road,Niagara Falls,ON,5,1.1,91.3,2026-02-03,43.09,-79.09,905-555-0188
+Safeway 4848,850 KEEWATIN STREET,Winnipeg,MB,5,1.7,53.5,2026-02-06,49.88,-97.16,204-555-0199
+Maxi & CIE 8675,8305 Avenue papineau,Montreal,QC,7,2.4,66.3,2026-01-25,45.56,-73.58,514-555-0200
+Metro 153,73 Main St. W,Picton,ON,1,5.7,28.3,2026-01-14,44.01,-77.14,613-555-0211
+Safeway 4912,20871 Fraser Highway,Langley,BC,12,2.4,100.0,2026-02-15,49.10,-122.61,604-555-0222
+Safeway 4966,1780 E Broadway,Vancouver,BC,13,2.0,99.9,2026-02-20,49.26,-123.07,604-555-0233
+The Real Canadian Superstore 1559,32136 Lougheed Highway,Mission,BC,6,3.0,100.0,2026-02-18,49.14,-122.30,604-555-0244
+Maxi 8635,355 Rue Principale,Lachute,QC,6,3.9,72.4,2026-01-12,45.65,-74.38,450-555-0255
+Food Basics 843,1070 Majr Mackenzie Dr E,Richmond Hill,ON,6,9.8,98.0,2026-02-07,43.88,-79.44,905-555-0266
+Metro 135,400 Bayfield St,Barrie,ON,8,7.2,99.9,2026-02-11,44.39,-79.69,705-555-0277
+Food Basics 904,227 Vodden Street,Brampton,ON,12,2.6,99.9,2026-02-14,43.70,-79.76,905-555-0288
+Metro 800,40 Eglinton Square,Scarborough,ON,10,2.5,99.9,2026-02-19,43.73,-79.28,416-555-0299"""
+
+# ============================================================
+# LANDING PAGE TEMPLATE (with RAW GitHub Image URLs)
+# ============================================================
+LANDING_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FleetIntel — Asset Intelligence Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background: #f0f4fb;
+            color: #0a1a2b;
+        }
+        .container { max-width: 1200px; margin: 0 auto; padding: 0 24px; }
+        .hero { padding: 60px 0 40px; text-align: center; }
+        .hero h1 { font-size: 3.2rem; font-weight: 900; letter-spacing: -0.02em; line-height: 1.1; }
+        .hero h1 span { color: #1e3a5f; }
+        .hero p { font-size: 1.2rem; color: #475569; max-width: 600px; margin: 16px auto 32px; }
+        .hero .btn-primary { background: #1e3a5f; color: white; padding: 14px 40px; border-radius: 60px; text-decoration: none; font-weight: 700; display: inline-block; transition: 0.2s; border: none; font-size: 1rem; cursor: pointer; }
+        .hero .btn-primary:hover { background: #0f2b4a; transform: translateY(-2px); }
+        .features { padding: 40px 0 60px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+        .feature-card { background: white; padding: 28px; border-radius: 20px; border: 1px solid #e9edf2; text-align: center; transition: 0.2s; }
+        .feature-card:hover { transform: translateY(-4px); box-shadow: 0 12px 32px -8px rgba(0,0,0,0.06); }
+        .feature-card .icon { font-size: 2.4rem; margin-bottom: 12px; }
+        .feature-card h3 { font-weight: 700; margin-bottom: 8px; }
+        .feature-card p { font-size: 0.95rem; color: #64748b; }
+        .preview { background: white; border-radius: 24px; padding: 24px; border: 1px solid #e9edf2; margin-bottom: 40px; box-shadow: 0 8px 24px rgba(0,0,0,0.04); }
+        .preview img { width: 100%; border-radius: 16px; border: 1px solid #e9edf2; }
+        .preview .caption { text-align: center; padding: 12px 0 4px; color: #64748b; font-size: 0.9rem; }
+        .pricing { text-align: center; padding: 40px 0 60px; }
+        .pricing h2 { font-size: 2.2rem; font-weight: 800; }
+        .pricing .sub { color: #64748b; margin-bottom: 32px; }
+        .pricing-card { max-width: 400px; margin: 0 auto; background: white; border-radius: 24px; padding: 32px; border: 1px solid #e9edf2; box-shadow: 0 8px 24px rgba(0,0,0,0.04); }
+        .pricing-card .price { font-size: 3rem; font-weight: 900; color: #0a1a2b; }
+        .pricing-card .price span { font-size: 1rem; font-weight: 400; color: #64748b; }
+        .pricing-card ul { list-style: none; text-align: left; margin: 24px 0; }
+        .pricing-card ul li { padding: 8px 0; border-bottom: 1px solid #f1f5f9; display: flex; align-items: center; gap: 10px; }
+        .pricing-card ul li::before { content: "✓"; color: #1e3a5f; font-weight: 700; }
+        .pricing-card .btn-primary { background: #1e3a5f; color: white; padding: 14px 40px; border-radius: 60px; text-decoration: none; font-weight: 700; display: inline-block; transition: 0.2s; border: none; font-size: 1rem; cursor: pointer; width: 100%; }
+        .pricing-card .btn-primary:hover { background: #0f2b4a; }
+        .footer { text-align: center; padding: 32px 0; border-top: 1px solid #e9edf2; color: #94a3b8; font-size: 0.9rem; }
+        .footer a { color: #1e3a5f; text-decoration: none; }
+        @media (max-width: 768px) { .hero h1 { font-size: 2.2rem; } .features { grid-template-columns: 1fr; } .pricing-card { margin: 0 16px; } }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="hero">
+            <h1>See exactly which machines are <span>costing you money</span></h1>
+            <p>Upload your fleet data and get a live dashboard with maps, filters, and real-time loss metrics. Stop guessing — start fixing.</p>
+            <a href="{{ url_for('register') }}" class="btn-primary">Try It Free — 14-Day Trial</a>
+            <p style="margin-top:12px; font-size:0.85rem; color:#94a3b8;">No credit card required</p>
+        </div>
+
+        <!-- ===== SCREENSHOTS WITH RAW GITHUB URLS ===== -->
+        <div class="preview">
+            <img src="https://raw.githubusercontent.com/LogicLegion/Fleetintel/main/Fleetintel0.png" alt="FleetIntel Dashboard Preview">
+            <div class="caption">📊 Live dashboard with KPIs, table, and asset map</div>
+        </div>
+        <div class="preview">
+            <img src="https://raw.githubusercontent.com/LogicLegion/Fleetintel/main/Fleetintel1.png" alt="FleetIntel Dashboard Map View">
+            <div class="caption">🗺️ Interactive map with color-coded asset status</div>
+        </div>
+
+        <div class="features">
+            <div class="feature-card"><div class="icon">📊</div><h3>12 Key Metrics</h3><p>Volume, reject rate, uptime, daily loss, service days — all in one view.</p></div>
+            <div class="feature-card"><div class="icon">🗺️</div><h3>Live Map</h3><p>See all your assets on a map. Color-coded by status.</p></div>
+            <div class="feature-card"><div class="icon">🔍</div><h3>Filters &amp; Search</h3><p>Find what you need in seconds with region, status, and search filters.</p></div>
+            <div class="feature-card"><div class="icon">💰</div><h3>Daily Loss Calculator</h3><p>See exactly how much each machine is losing from rejects and downtime.</p></div>
+            <div class="feature-card"><div class="icon">📞</div><h3>One-Click Call</h3><p>Call your technician directly from the dashboard.</p></div>
+            <div class="feature-card"><div class="icon">📸</div><h3>Export Reports</h3><p>Download screenshots or full reports to share with your team.</p></div>
+        </div>
+
+        <div class="pricing">
+            <h2>Simple, transparent pricing</h2>
+            <p class="sub">No hidden fees. Cancel anytime.</p>
+            <div class="pricing-card">
+                <div class="price">$199 <span>/ month</span></div>
+                <p style="color:#475569; margin: 8px 0 16px;">Per location · Unlimited users</p>
+                <ul>
+                    <li>Unlimited assets</li>
+                    <li>Live dashboard with maps</li>
+                    <li>Filters, search, and sorting</li>
+                    <li>Export reports and screenshots</li>
+                    <li>14-day free trial</li>
+                    <li>No contract — cancel anytime</li>
+                </ul>
+                <a href="{{ url_for('register') }}" class="btn-primary">Start Free Trial</a>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>&copy; 2026 FleetIntel. Built with ❤️ in Canada.</p>
+            <p>
+                <a href="mailto:jjaaluk@gmail.com">✉️ Contact</a> ·
+                <a href="https://fleetintel.onrender.com" target="_blank">Live Demo</a>
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+
+# ============================================================
+# HTML TEMPLATES (LOGIN, REGISTER, DASHBOARD)
 # ============================================================
 
-HTML_TEMPLATE = """
+LOGIN_TEMPLATE = """
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cypher - AI Judge</title>
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚖️</text></svg>" type="image/svg+xml">
+    <title>FleetIntel — Login</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { 
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
-            min-height: 100vh; 
-            display: flex; 
-            justify-content: center; 
-            align-items: center; 
-            padding: 20px; 
-            background: #f5f7fa; 
-            color: #1a2332; 
-        }
-        .container { 
-            max-width: 680px; 
-            width: 100%; 
-            text-align: center; 
-        }
-        
-        /* ===== HEADER ===== */
-        .header { 
-            display: flex; 
-            justify-content: space-between; 
-            align-items: center; 
-            padding: 8px 0 16px 0; 
-            border-bottom: 1px solid #e2e8f0; 
-            margin-bottom: 24px; 
-            flex-wrap: wrap; 
-            gap: 8px; 
-        }
-        .header h1 { 
-            font-size: 20px; 
-            font-weight: 700; 
-            color: #1a2332; 
-        }
-        .header h1 .cypher-name { 
-            color: #58a6ff; 
-        }
-        .header-actions { 
-            display: flex; 
-            gap: 6px; 
-            align-items: center; 
-            flex-wrap: wrap; 
-        }
-        .header-actions button { 
-            background: none; 
-            border: none; 
-            font-size: 13px; 
-            cursor: pointer; 
-            padding: 4px 10px; 
-            border-radius: 6px; 
-            transition: 0.2s; 
-            color: #4a5568; 
-        }
-        .header-actions button:hover { 
-            background: #e2e8f0; 
-            color: #1a2332; 
-        }
-        .donate-btn { 
-            font-size: 14px; 
-            text-decoration: none; 
-            padding: 6px 16px; 
-            border-radius: 50px; 
-            transition: all 0.3s ease; 
-            background: #FFDD00;
-            color: #1a2332;
-            font-weight: 700;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            box-shadow: 0 2px 10px rgba(255, 221, 0, 0.3);
-        }
-        .donate-btn:hover { 
-            background: #FFC107; 
-            transform: scale(1.05);
-        }
-        
-        /* ===== PRIVACY BANNER ===== */
-        .privacy-banner {
-            background: #1a2332;
-            color: #c9d1d9;
-            padding: 14px 20px;
-            border-radius: 14px;
-            margin-bottom: 16px;
-            text-align: center;
-            border: 1px solid #30363d;
-        }
-        .privacy-headline {
-            font-size: 20px;
-            font-weight: 700;
-            color: #58a6ff;
-            margin-bottom: 4px;
-        }
-        .privacy-subtext {
-            font-size: 14px;
-            color: #8b949e;
-        }
-        
-        /* ===== CANADA BANNER ===== */
-        .info-banner {
-            background: linear-gradient(135deg, #f8f9fa, #e9ecef);
-            padding: 10px 16px;
-            border-radius: 12px;
-            margin-bottom: 20px;
-            font-size: 13px;
-            color: #4a5568;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            flex-wrap: wrap;
-            gap: 8px;
-        }
-        .info-banner .flag {
-            font-size: 16px;
-        }
-        .info-banner .tag {
-            background: #58a6ff;
-            color: white;
-            padding: 2px 10px;
-            border-radius: 12px;
-            font-size: 11px;
-            font-weight: 600;
-        }
-        .info-banner .tag.canada {
-            background: #FF0000;
-        }
-        
-        /* ===== WELCOME ===== */
-        .welcome-section {
-            margin-bottom: 20px;
-        }
-        .welcome-section h2 {
-            font-size: 28px;
-            font-weight: 600;
-            color: #1a2332;
-        }
-        .welcome-section h2 .highlight {
-            color: #58a6ff;
-        }
-        .welcome-section p {
-            font-size: 16px;
-            color: #4a5568;
-            margin-top: 4px;
-        }
-        .welcome-section .sub {
-            font-size: 13px;
-            color: #718096;
-            margin-top: 2px;
-        }
-        
-        /* ===== CONTROLS ===== */
-        .controls { 
-            display: flex; 
-            gap: 10px; 
-            justify-content: center; 
-            align-items: center; 
-            margin-bottom: 16px; 
-            flex-wrap: wrap; 
-        }
-        .controls select { 
-            background: transparent; 
-            border: 1px solid #e2e8f0; 
-            padding: 5px 10px; 
-            border-radius: 8px; 
-            font-size: 13px; 
-            cursor: pointer; 
-            outline: none; 
-        }
-        .controls select:hover {
-            border-color: #58a6ff;
-        }
-        .controls label {
-            font-size: 13px;
-            display: flex;
-            align-items: center;
-            gap: 4px;
-            color: #4a5568;
-        }
-        
-        /* ===== GRADE SELECTOR ===== */
-        .grade-selector {
-            display: none;
-            margin-bottom: 12px;
-            justify-content: center;
-            gap: 8px;
-            flex-wrap: wrap;
-        }
-        .grade-selector.visible {
-            display: flex;
-        }
-        .grade-selector select {
-            background: transparent;
-            border: 1px solid #e2e8f0;
-            padding: 5px 10px;
-            border-radius: 8px;
-            font-size: 13px;
-            cursor: pointer;
-            outline: none;
-            color: #1a2332;
-        }
-        .grade-selector select:hover {
-            border-color: #58a6ff;
-        }
-        .grade-selector .grade-label {
-            font-size: 13px;
-            color: #4a5568;
-            display: flex;
-            align-items: center;
-        }
-        
-        /* ===== FUSION INFO ===== */
-        .fusion-info {
-            font-size: 11px;
-            color: #718096;
-            margin-top: 2px;
-            margin-bottom: 12px;
-            padding: 4px 12px;
-            background: #edf2f7;
-            border-radius: 20px;
-            display: inline-block;
-        }
-        
-        /* ===== FILE UPLOAD ===== */
-        .file-upload-area { 
-            margin-bottom: 14px; 
-            padding: 12px; 
-            border: 2px dashed #e2e8f0; 
-            border-radius: 12px; 
-            cursor: pointer; 
-            transition: all 0.3s; 
-        }
-        .file-upload-area:hover { 
-            border-color: #58a6ff; 
-            background: rgba(88, 166, 255, 0.05); 
-        }
-        .file-upload-area .file-label { 
-            display: flex; 
-            align-items: center; 
-            justify-content: center; 
-            gap: 8px; 
-            font-size: 14px; 
-            cursor: pointer; 
-            color: #4a5568; 
-        }
-        .file-upload-area .file-label input[type="file"] { 
-            display: none; 
-        }
-        .file-upload-area .file-info { 
-            font-size: 12px; 
-            margin-top: 4px; 
-            color: #718096; 
-        }
-        
-        /* ===== CHAT ===== */
-        .chat-area { 
-            border: 1px solid #e2e8f0; 
-            border-radius: 12px; 
-            padding: 14px; 
-            margin-bottom: 14px; 
-            max-height: 320px; 
-            overflow-y: auto; 
-            text-align: left; 
-            min-height: 70px; 
-            display: none; 
-            background: #ffffff; 
-        }
-        .chat-area.has-messages { 
-            display: block; 
-        }
-        .chat-area .message { 
-            margin-bottom: 10px; 
-            padding: 6px 12px; 
-            border-radius: 8px; 
-        }
-        .chat-area .message.user { 
-            background: #edf2ff; 
-            border-left: 3px solid #58a6ff; 
-        }
-        .chat-area .message.bot { 
-            background: #f7fafc; 
-            border-left: 3px solid #f0883e; 
-        }
-        .chat-area .message .role { 
-            font-size: 11px; 
-            margin-bottom: 2px; 
-            font-weight: 600; 
-            color: #4a5568; 
-        }
-        .chat-area .message .content { 
-            line-height: 1.5; 
-            word-wrap: break-word; 
-        }
-        .typing-indicator { 
-            font-size: 14px; 
-            padding: 6px 0; 
-            display: none; 
-            color: #718096; 
-        }
-        
-        /* ===== INPUT ===== */
-        .input-area { 
-            display: flex; 
-            gap: 8px; 
-            border: 1px solid #e2e8f0; 
-            border-radius: 24px; 
-            padding: 6px 12px; 
-            align-items: center; 
-            background: #ffffff; 
-        }
-        .input-area input { 
-            flex: 1; 
-            background: transparent; 
-            border: none; 
-            font-size: 15px; 
-            padding: 10px 4px; 
-            outline: none; 
-        }
-        .input-area .input-btn {
-            background: none;
-            border: none;
-            font-size: 20px;
-            cursor: pointer;
-            padding: 6px 10px;
-            border-radius: 50%;
-            transition: 0.2s;
-            color: #4a5568;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            min-width: 40px;
-            min-height: 40px;
-        }
-        .input-area .input-btn:hover { 
-            background: #edf2f7; 
-        }
-        .input-area .input-btn.send-btn {
-            color: #58a6ff;
-            font-size: 18px;
-            font-weight: 600;
-        }
-        .input-area .input-btn.voice-btn {
-            color: #58a6ff;
-        }
-        .input-area .input-btn.voice-btn.listening {
-            color: #FF0000;
-            animation: pulse-voice 1s infinite;
-            background: rgba(255, 0, 0, 0.1);
-        }
-        @keyframes pulse-voice {
-            0% { transform: scale(1); }
-            50% { transform: scale(1.1); }
-            100% { transform: scale(1); }
-        }
-        .input-area .input-btn:disabled {
-            opacity: 0.3;
-            cursor: not-allowed;
-        }
-        
-        /* ===== FOOTER ===== */
-        .footer { 
-            margin-top: 16px; 
-            font-size: 12px; 
-            color: #a0aec0; 
-        }
-        .footer a { 
-            color: #58a6ff; 
-            text-decoration: none; 
-        }
-        .footer a:hover { 
-            text-decoration: underline; 
-        }
-        
-        /* ===== BADGES ===== */
-        .badge-container { 
-            margin-top: 12px; 
-            padding: 8px; 
-            display: flex; 
-            justify-content: center; 
-            align-items: center;
-            gap: 12px; 
-            flex-wrap: wrap; 
-        }
-        .badge-container img { 
-            height: 36px; 
-            width: auto; 
-        }
-        .badge-container .badge-text {
-            font-size: 12px;
-            color: #4a5568;
-            font-weight: 500;
-        }
-        .badge-container .kofi-button {
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            text-decoration: none;
-            background: #FFDD00;
-            padding: 4px 12px 4px 8px;
-            border-radius: 50px;
-            font-weight: 700;
-            font-size: 13px;
-            color: #1a2332;
-            box-shadow: 0 2px 8px rgba(255, 221, 0, 0.3);
-            transition: 0.3s;
-        }
-        .badge-container .kofi-button:hover {
-            transform: scale(1.05);
-        }
-        .badge-container .kofi-button img {
-            height: 22px;
-            width: auto;
-        }
-        .badge-container .saas-badge {
-            height: 36px;
-            width: auto;
-            border-radius: 4px;
-        }
-        
-        /* Visitor Counter */
-        .visitor-counter {
-            font-size: 11px;
-            color: #718096;
-            margin-top: 8px;
-        }
-        
-        @media (max-width: 600px) { 
-            .welcome-section h2 { font-size: 22px; }
-            .header h1 { font-size: 17px; }
-            .header-actions { gap: 4px; }
-            .header-actions button { font-size: 12px; padding: 3px 8px; }
-            .donate-btn { font-size: 13px; padding: 5px 12px; }
-            .privacy-headline { font-size: 17px; }
-            .privacy-subtext { font-size: 12px; }
-            .info-banner { font-size: 12px; padding: 8px 12px; }
-            .controls select { font-size: 12px; padding: 4px 8px; }
-            .grade-selector select { font-size: 12px; padding: 4px 8px; }
-            .input-area { padding: 4px 10px; }
-            .input-area input { font-size: 14px; padding: 8px 4px; }
-            .input-area .input-btn { font-size: 17px; padding: 4px 8px; min-width: 34px; min-height: 34px; }
-            .badge-container img { height: 28px; }
-            .badge-container .kofi-button { font-size: 12px; padding: 3px 10px 3px 8px; }
-            .badge-container .kofi-button img { height: 18px; }
-            .badge-container .saas-badge { height: 28px; }
-            .fusion-info { font-size: 10px; padding: 3px 10px; }
-        }
+        body { font-family: 'Inter', sans-serif; min-height: 100vh; display: flex; justify-content: center; align-items: center; background: #f0f4fb; padding: 20px; }
+        .login-card { background: white; border-radius: 32px; padding: 48px 40px; max-width: 420px; width: 100%; box-shadow: 0 20px 45px -12px rgba(0,0,0,0.08); border: 1px solid #e9edf2; text-align: center; }
+        .login-card h1 { font-size: 28px; font-weight: 800; color: #0a1a2b; }
+        .login-card h1 span { color: #1e3a5f; }
+        .login-card .sub { color: #64748b; font-size: 14px; margin: 8px 0 24px 0; }
+        .login-card input { width: 100%; padding: 14px 16px; border: 1px solid #e2e8f0; border-radius: 14px; font-size: 15px; margin-bottom: 12px; }
+        .login-card input:focus { outline: none; border-color: #1e3a5f; box-shadow: 0 0 0 3px rgba(30, 58, 95, 0.1); }
+        .login-card button { width: 100%; padding: 14px; background: #1e3a5f; color: white; border: none; border-radius: 14px; font-size: 16px; font-weight: 700; cursor: pointer; transition: 0.2s; }
+        .login-card button:hover { background: #0f2b4a; }
+        .login-card .footer-text { margin-top: 16px; font-size: 14px; color: #64748b; }
+        .login-card .footer-text a { color: #1e3a5f; font-weight: 600; text-decoration: none; }
+        .login-card .footer-text a:hover { text-decoration: underline; }
+        .error { color: #dc2626; font-size: 14px; margin-bottom: 12px; background: #fef2f2; padding: 8px; border-radius: 8px; }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <h1>📊 <span>FleetIntel</span></h1>
+        <p class="sub">Sign in to your account</p>
+        {% if error %}<div class="error">{{ error }}</div>{% endif %}
+        <form method="POST">
+            <input type="text" name="username" placeholder="Username" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">Sign In</button>
+        </form>
+        <p class="footer-text">Don't have an account? <a href="{{ url_for('register') }}">Register</a></p>
+    </div>
+</body>
+</html>
+"""
+
+REGISTER_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FleetIntel — Register</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; min-height: 100vh; display: flex; justify-content: center; align-items: center; background: #f0f4fb; padding: 20px; }
+        .register-card { background: white; border-radius: 32px; padding: 48px 40px; max-width: 420px; width: 100%; box-shadow: 0 20px 45px -12px rgba(0,0,0,0.08); border: 1px solid #e9edf2; text-align: center; }
+        .register-card h1 { font-size: 28px; font-weight: 800; color: #0a1a2b; }
+        .register-card h1 span { color: #1e3a5f; }
+        .register-card .sub { color: #64748b; font-size: 14px; margin: 8px 0 24px 0; }
+        .register-card input { width: 100%; padding: 14px 16px; border: 1px solid #e2e8f0; border-radius: 14px; font-size: 15px; margin-bottom: 12px; }
+        .register-card input:focus { outline: none; border-color: #1e3a5f; box-shadow: 0 0 0 3px rgba(30, 58, 95, 0.1); }
+        .register-card button { width: 100%; padding: 14px; background: #1e3a5f; color: white; border: none; border-radius: 14px; font-size: 16px; font-weight: 700; cursor: pointer; transition: 0.2s; }
+        .register-card button:hover { background: #0f2b4a; }
+        .register-card .footer-text { margin-top: 16px; font-size: 14px; color: #64748b; }
+        .register-card .footer-text a { color: #1e3a5f; font-weight: 600; text-decoration: none; }
+        .register-card .footer-text a:hover { text-decoration: underline; }
+        .error { color: #dc2626; font-size: 14px; margin-bottom: 12px; background: #fef2f2; padding: 8px; border-radius: 8px; }
+    </style>
+</head>
+<body>
+    <div class="register-card">
+        <h1>📊 <span>FleetIntel</span></h1>
+        <p class="sub">Create your account</p>
+        {% if error %}<div class="error">{{ error }}</div>{% endif %}
+        <form method="POST">
+            <input type="text" name="username" placeholder="Username" required>
+            <input type="email" name="email" placeholder="Email" required>
+            <input type="password" name="password" placeholder="Password" required>
+            <button type="submit">Create Account</button>
+        </form>
+        <p class="footer-text">Already have an account? <a href="{{ url_for('login') }}">Sign In</a></p>
+    </div>
+</body>
+</html>
+"""
+
+DASHBOARD_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fleet Intelligence LIVE</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Inter', sans-serif; background: #f0f4fb; padding: 20px 16px; color: #0a1a2b; }
+        .container { max-width: 1440px; margin: 0 auto; }
+        .hero-header { background: linear-gradient(145deg, #0f2b4a 0%, #1a3a60 50%, #0f2b4a 100%); border-radius: 40px; padding: 2.2rem 2.8rem; margin-bottom: 2rem; color: white; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; box-shadow: 0 20px 40px -12px rgba(10, 30, 60, 0.3); border: 1px solid rgba(255,255,255,0.08); }
+        .hero-left h1 { font-size: 2.2rem; font-weight: 900; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; letter-spacing: -0.02em; }
+        .hero-left h1 i { color: #f0b90b; }
+        .live-pulse { display: inline-flex; align-items: center; gap: 8px; background: rgba(34, 197, 94, 0.2); backdrop-filter: blur(4px); padding: 6px 16px; border-radius: 40px; font-size: 0.75rem; font-weight: 700; color: #86efac; border: 1px solid rgba(34, 197, 94, 0.3); letter-spacing: 0.3px; text-transform: uppercase; }
+        .live-pulse::before { content: ""; width: 8px; height: 8px; background: #22c55e; border-radius: 50%; display: inline-block; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 100% { opacity: 0.2; transform: scale(1.4); } }
+        .hero-left .subtitle { color: #b0c8e5; margin-top: 6px; font-size: 0.95rem; font-weight: 400; }
+        .hero-right { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+        .hero-btn { background: rgba(255,255,255,0.1); backdrop-filter: blur(4px); border: 1px solid rgba(255,255,255,0.15); padding: 10px 22px; border-radius: 40px; color: white; cursor: pointer; font-weight: 600; transition: all 0.25s; display: inline-flex; align-items: center; gap: 8px; font-size: 0.85rem; }
+        .hero-btn:hover { background: rgba(255,255,255,0.2); transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,0,0,0.15); }
+        .hero-btn.primary { background: linear-gradient(135deg, #f0b90b, #f5c947); color: #0a1a2b; border: none; font-weight: 700; }
+        .hero-btn.primary:hover { background: linear-gradient(135deg, #f5c947, #f0b90b); }
+        .hero-btn.outline { background: transparent; border: 1px solid rgba(255,255,255,0.3); }
+        .hero-btn.outline:hover { background: rgba(255,255,255,0.1); }
+        .upload-card { max-width: 900px; margin: 0 auto 2.5rem auto; background: white; border-radius: 32px; padding: 2.5rem 3rem; text-align: center; box-shadow: 0 20px 45px -12px rgba(0,0,0,0.08); border: 1px solid rgba(255,255,255,0.7); backdrop-filter: blur(8px); transition: all 0.3s; }
+        .upload-card h2 { font-size: 1.8rem; font-weight: 800; color: #0a1a2b; margin-bottom: 4px; }
+        .upload-card p { color: #64748b; margin-bottom: 20px; font-size: 1rem; }
+        .upload-button { background: #f1f5f9; border: 2px dashed #cbd5e1; border-radius: 24px; padding: 2.2rem; cursor: pointer; display: inline-block; transition: all 0.3s; width: 100%; max-width: 400px; }
+        .upload-button:hover { background: #e8edf5; border-color: #94a3b8; transform: scale(1.01); }
+        .upload-button i { font-size: 2.5rem; color: #1e3a5f; margin-bottom: 8px; }
+        .upload-button strong { font-size: 1.1rem; color: #0a1a2b; }
+        .upload-button small { display: block; color: #94a3b8; margin-top: 4px; }
+        .demo-btn-wrapper { margin-top: 18px; display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+        .demo-btn { padding: 14px 32px; border-radius: 60px; border: none; font-weight: 800; font-size: 1rem; cursor: pointer; transition: all 0.3s; display: inline-flex; align-items: center; gap: 10px; box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
+        .demo-btn:hover { transform: translateY(-3px); box-shadow: 0 8px 28px rgba(0,0,0,0.15); }
+        .demo-btn.sample { background: linear-gradient(135deg, #f0b90b, #f5c947); color: #0a1a2b; }
+        .demo-btn.screenshot { background: linear-gradient(135deg, #2563eb, #1d4ed8); color: white; }
+        .divider { display: flex; align-items: center; gap: 16px; margin: 16px 0; color: #94a3b8; font-size: 0.85rem; }
+        .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: #e2e8f0; }
+        #fileStatus { margin-top: 12px; color: #475569; font-weight: 500; }
+        #dashboard { display: none; }
+        #dataTimestamp { background: #e8edf5; padding: 8px 20px; border-radius: 40px; display: inline-block; margin-bottom: 24px; font-weight: 600; color: #1e3a5f; font-size: 0.9rem; }
+        .kpi-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px; margin-bottom: 28px; }
+        .kpi-card { background: white; border-radius: 24px; padding: 20px 16px; border: 1px solid #e9edf2; text-align: center; box-shadow: 0 4px 12px rgba(0,0,0,0.02); transition: all 0.25s; }
+        .kpi-card:hover { transform: translateY(-4px); box-shadow: 0 12px 28px -8px rgba(0,0,0,0.06); }
+        .kpi-label { font-size: 11px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+        .kpi-value { font-size: 2.2rem; font-weight: 900; color: #0a1a2b; }
+        .kpi-loss { color: #dc2626; }
+        .kpi-green { color: #10b981; }
+        .kpi-blue { color: #2563eb; }
+        .kpi-yellow { color: #f59e0b; }
+        .filters { display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 28px; align-items: flex-end; background: white; padding: 18px 22px; border-radius: 24px; border: 1px solid #e9edf2; box-shadow: 0 4px 12px rgba(0,0,0,0.02); }
+        .filter-group { display: flex; flex-direction: column; gap: 6px; min-width: 120px; flex: 1; }
+        .filter-group label { font-size: 10px; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.3px; }
+        select, input, button { padding: 10px 14px; border-radius: 14px; font-size: 0.85rem; border: 1px solid #e2e8f0; background: white; transition: all 0.2s; }
+        select:focus, input:focus { border-color: #1e3a5f; outline: none; box-shadow: 0 0 0 3px rgba(30, 58, 95, 0.1); }
+        button { background: #1e3a5f; color: white; border: none; cursor: pointer; font-weight: 600; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; }
+        button:hover { background: #0f2b4a; transform: translateY(-1px); }
+        .reset-btn { background: #f1f5f9; color: #1e293b; border: 1px solid #e2e8f0; }
+        .reset-btn:hover { background: #e2e8f0; }
+        .table-wrapper { background: white; border-radius: 24px; overflow-x: auto; max-height: 480px; border: 1px solid #e9edf2; margin-bottom: 28px; box-shadow: 0 4px 12px rgba(0,0,0,0.02); }
+        table { width: 100%; border-collapse: collapse; font-size: 0.8rem; min-width: 1200px; }
+        th { background: #f8fafc; padding: 14px 12px; font-weight: 700; border-bottom: 2px solid #e2e8f0; position: sticky; top: 0; text-align: left; color: #1e293b; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.3px; }
+        td { padding: 12px 12px; border-bottom: 1px solid #f1f5f9; }
+        .critical-row { background-color: #fef2f2; border-left: 4px solid #dc2626; }
+        .warning-row { background-color: #fffbeb; border-left: 4px solid #f59e0b; }
+        .good-row { background-color: #f0fdf4; border-left: 4px solid #10b981; }
+        .offline-row { background-color: #f1f5f9; border-left: 4px solid #6b7280; }
+        .badge { display: inline-block; padding: 4px 12px; border-radius: 40px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; }
+        .badge-critical { background: #fee2e2; color: #dc2626; }
+        .badge-warning { background: #fef3c7; color: #f59e0b; }
+        .badge-good { background: #dcfce7; color: #10b981; }
+        .badge-offline { background: #e2e8f0; color: #6b7280; }
+        .map-container { background: white; border-radius: 24px; padding: 24px; margin-bottom: 28px; border: 1px solid #e9edf2; box-shadow: 0 4px 12px rgba(0,0,0,0.02); }
+        .map-container h3 { font-weight: 700; color: #0a1a2b; margin-bottom: 16px; display: flex; align-items: center; gap: 10px; }
+        #map { height: 400px; border-radius: 16px; z-index: 1; }
+        .map-legend { display: flex; justify-content: center; gap: 24px; margin-top: 14px; font-size: 0.8rem; font-weight: 500; flex-wrap: wrap; }
+        .map-legend-dot { display: inline-block; width: 14px; height: 14px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+        #demoModal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.7); z-index: 9999; justify-content: center; align-items: center; padding: 20px; backdrop-filter: blur(4px); }
+        .modal-content { background: white; border-radius: 32px; max-width: 900px; width: 100%; max-height: 90vh; overflow-y: auto; padding: 28px; position: relative; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
+        .modal-close { position: sticky; top: 0; float: right; background: #f1f5f9; border: none; border-radius: 50%; width: 40px; height: 40px; font-size: 1.2rem; cursor: pointer; z-index: 10; transition: 0.2s; }
+        .modal-close:hover { background: #e2e8f0; }
+        .modal-content h2 { margin-bottom: 4px; }
+        .modal-content .sub { color: #64748b; margin-bottom: 16px; }
+        .screenshot-grid { display: flex; flex-direction: column; gap: 16px; }
+        .screenshot-item { border: 1px solid #e2e8f0; border-radius: 16px; overflow: hidden; background: #f8fafc; }
+        .screenshot-item img { width: 100%; display: block; }
+        .screenshot-item .caption { padding: 8px 12px; font-size: 0.8rem; color: #64748b; text-align: center; background: white; }
+        .modal-footer { margin-top: 20px; text-align: center; }
+        .modal-footer button { background: #1e3a5f; color: white; padding: 10px 32px; border-radius: 40px; border: none; font-weight: 600; cursor: pointer; transition: 0.2s; }
+        .modal-footer button:hover { background: #0f2b4a; }
+        .toast { position: fixed; bottom: 30px; right: 30px; background: #0a1a2b; color: white; padding: 14px 28px; border-radius: 60px; font-size: 0.9rem; font-weight: 500; z-index: 1000; display: none; box-shadow: 0 8px 24px rgba(0,0,0,0.2); }
+        @media (max-width: 768px) { .hero-header { flex-direction: column; text-align: center; padding: 1.5rem; } .kpi-grid { grid-template-columns: repeat(2, 1fr); } .filters { flex-direction: column; } .filter-group { min-width: 100%; } .upload-card { padding: 1.5rem; } .demo-btn-wrapper { flex-direction: column; align-items: center; } .demo-btn { width: 100%; justify-content: center; } }
     </style>
 </head>
 <body>
     <div class="container">
-        <!-- ===== HEADER ===== -->
-        <div class="header">
-            <h1>⚖️ <span class="cypher-name">Cypher</span></h1>
-            <div class="header-actions">
-                <button onclick="startNewChat()">New Chat</button>
-                <button onclick="clearChat()">Clear</button>
-                <button onclick="shareCypher()">📤 Share</button>
-                <a href="https://ko-fi.com/cypheryaps" target="_blank" class="donate-btn">☕ Donate</a>
+        <div class="hero-header">
+            <div class="hero-left">
+                <h1><i class="fas fa-chart-line"></i> Fleet Intelligence <span class="live-pulse">LIVE</span></h1>
+                <div class="subtitle">Real-time asset performance &amp; predictive analytics</div>
+            </div>
+            <div class="hero-right">
+                <span style="color:#b0c8e5;font-size:14px;">👤 {{ current_user.username }}</span>
+                <button class="hero-btn" id="uploadBtn"><i class="fas fa-upload"></i> Upload CSV</button>
+                <button class="hero-btn primary" id="screenshotBtn"><i class="fas fa-camera"></i> Screenshot</button>
+                <button class="hero-btn primary" id="reportBtn"><i class="fas fa-file-pdf"></i> Report</button>
+                <a href="{{ url_for('logout') }}" class="hero-btn outline"><i class="fas fa-sign-out-alt"></i> Logout</a>
             </div>
         </div>
-
-        <!-- ===== PRIVACY FIRST ===== -->
-        <div class="privacy-banner">
-            <div class="privacy-headline">🔒 Privacy First</div>
-            <div class="privacy-subtext">No login · No data stored · Nothing is ever tracked or shared</div>
-        </div>
-
-        <!-- ===== CANADA BANNER ===== -->
-        <div class="info-banner">
-            <span class="flag">🇨🇦</span>
-            <span>Supporting Canada ·</span>
-            <span>Non-US AI ·</span>
-            <span>Free &amp; Private</span>
-            <span class="tag canada">🇨🇦</span>
-        </div>
-
-        <!-- ===== WELCOME ===== -->
-        <div class="welcome-section">
-            <h2>This is <span class="highlight">Cypher</span>.</h2>
-            <p>How can I help you?</p>
-            <div class="sub">⚡ Cypher Fusion — Top Non-US Performance</div>
-        </div>
-
-        <!-- ===== CONTROLS ===== -->
-        <div class="controls">
-            <select id="personalitySelect" onchange="toggleGradeSelector()">
-                <option value="default">Judge</option>
-                <option value="analyst">Analyst</option>
-                <option value="writer">Writer</option>
-                <option value="coder">Coder</option>
-                <option value="friend">Friend</option>
-                <option value="teacher">👨‍🏫 Teacher (Alberta)</option>
-            </select>
-            <select id="fusionPreset" onchange="updateFusionInfo()">
-                <option value="cypher_max" selected>🧠 Smartest</option>
-                <option value="cypher_lite">⚡ Fastest</option>
-            </select>
-            <label><input type="checkbox" id="webSearchToggle" checked> Web</label>
-        </div>
-
-        <!-- ===== GRADE SELECTOR ===== -->
-        <div class="grade-selector" id="gradeSelector">
-            <span class="grade-label">📚 Grade:</span>
-            <select id="gradeSelect">
-                <option value="1">Grade 1</option>
-                <option value="2">Grade 2</option>
-                <option value="3">Grade 3</option>
-                <option value="4">Grade 4</option>
-                <option value="5">Grade 5</option>
-                <option value="6">Grade 6</option>
-                <option value="7" selected>Grade 7</option>
-                <option value="8">Grade 8</option>
-                <option value="9">Grade 9</option>
-                <option value="10">Grade 10</option>
-                <option value="11">Grade 11</option>
-                <option value="12">Grade 12</option>
-            </select>
-        </div>
-
-        <!-- ===== FUSION INFO ===== -->
-        <div class="fusion-info" id="fusionInfo">🧠 GLM-5.3 · DeepSeek V4 Pro · Qwen3.8-Max</div>
-
-        <!-- ===== FILE UPLOAD ===== -->
-        <div class="file-upload-area">
-            <label class="file-label">
-                <span id="fileIcon">📁</span>
-                <span id="fileText">Upload evidence (PDF, CSV, TXT)</span>
-                <input type="file" id="fileInput" accept=".pdf,.csv,.txt" onchange="handleFileUpload(event)">
-            </label>
-            <div class="file-info" id="fileInfo"></div>
-        </div>
-
-        <!-- ===== CHAT ===== -->
-        <div class="chat-area" id="chatArea">
-            <div id="messages"></div>
-            <div class="typing-indicator" id="typing">⚖️ Cypher is thinking...</div>
-        </div>
-
-        <!-- ===== INPUT ===== -->
-        <div class="input-area">
-            <input type="text" id="userInput" placeholder="Need help? I got ya." onkeydown="if(event.key==='Enter') sendMessage()">
-            <button class="input-btn voice-btn" id="voiceBtn" onclick="startVoice()" title="Click to speak">🎤</button>
-            <button class="input-btn send-btn" id="sendBtn" onclick="sendMessage()">⚖️</button>
-        </div>
-
-        <!-- ===== FOOTER ===== -->
-        <div class="footer">
-            <p>Free · No login · No data stored · 🇨🇦 Non-US AI</p>
-            <div class="visitor-counter">
-                👁️ <span id="visitorCount">Loading...</span> visitors
+        <input type="file" id="csvFile" accept=".csv" style="display:none;">
+        <div class="upload-card" id="uploadCard">
+            <h2><i class="fas fa-cloud-upload-alt" style="color:#1e3a5f;"></i> Upload Your Fleet Data</h2>
+            <p>Upload a CSV file with your asset data</p>
+            <div class="upload-button" id="uploadBtn2">
+                <i class="fas fa-file-csv"></i>
+                <strong>Choose File</strong>
+                <small>or drag &amp; drop</small>
             </div>
-            <div class="badge-container">
-                <span class="badge-text">📌 Listed on Turbo0</span>
-                <a href="https://dang.ai/tool/cypher-ai-judge-chatbot" target="_blank" rel="dofollow noopener">
-                    <img src="https://assets.dang.ai/badges/dang_verified-dark.png" alt="Verified on DANG!">
-                </a>
-                <a href="https://www.producthunt.com/posts/cypher-ai-judge" target="_blank" rel="noopener noreferrer">
-                    <img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=cypher-ai-judge&theme=light" alt="Cypher on Product Hunt">
-                </a>
-                <a href="https://www.saashub.com/cypher-yaps" target="_blank" rel="noopener noreferrer">
-                    <img src="https://www.saashub.com/images/badges/verified.png" alt="Verified on SaaSHub" class="saas-badge">
-                </a>
-                <a href="https://indexof.ai/tool/cypher?ref=cypher" target="_blank" rel="noopener">
-                    <img src="https://indexof.ai/badge-light.svg" alt="Featured on IndexOf.AI" style="height: 36px; width: auto;">
-                </a>
-                <a href="https://ko-fi.com/cypheryaps" target="_blank" class="kofi-button">
-                    <img src="https://storage.ko-fi.com/cdn/brandasset/kofi_brandtag.png" alt="Buy Me A Coffee">
-                    <span>Support</span>
-                </a>
+            <div class="divider"><span>or</span></div>
+            <div class="demo-btn-wrapper">
+                <button class="demo-btn screenshot" id="viewDemoBtn"><i class="fas fa-image"></i> View Demo Screenshots</button>
+                <button class="demo-btn sample" id="loadSampleBtn"><i class="fas fa-rocket"></i> Load Sample Data</button>
+            </div>
+            <div id="fileStatus"></div>
+        </div>
+        <div id="dashboard">
+            <div id="dataTimestamp"></div>
+            <div class="kpi-grid" id="kpiGrid">
+                <div class="kpi-card"><div class="kpi-label">📊 Total Assets</div><div class="kpi-value kpi-blue" id="kpiTotal">0</div></div>
+                <div class="kpi-card"><div class="kpi-label">🔴 Critical</div><div class="kpi-value" id="kpiCritical" style="color:#dc2626;">0</div></div>
+                <div class="kpi-card"><div class="kpi-label">🟡 Warning</div><div class="kpi-value" id="kpiWarning" style="color:#f59e0b;">0</div></div>
+                <div class="kpi-card"><div class="kpi-label">💸 Daily Loss</div><div class="kpi-value kpi-loss" id="kpiLoss">$0</div></div>
+            </div>
+            <div class="filters">
+                <div class="filter-group"><label>Region</label><select id="regionFilter"><option value="all">All</option></select></div>
+                <div class="filter-group"><label>Status</label><select id="statusFilter"><option value="all">All</option><option value="critical">Critical</option><option value="warning">Warning</option><option value="good">Good</option><option value="offline">Offline</option></select></div>
+                <div class="filter-group"><label>Search</label><input type="text" id="searchInput" placeholder="Search assets..."></div>
+                <button id="resetBtn" class="reset-btn"><i class="fas fa-undo"></i> Reset</button>
+            </div>
+            <div class="table-wrapper">
+                <table id="dataTable">
+                    <thead><tr><th>Asset</th><th>Address</th><th>City</th><th>Region</th><th>Status</th><th>Volume</th><th>Reject%</th><th>Uptime%</th><th>Est. Revenue</th><th>Daily Loss</th><th>Service Days</th><th>Call</th></tr></thead>
+                    <tbody id="tableBody"></tbody>
+                </table>
+            </div>
+            <div class="map-container">
+                <h3><i class="fas fa-map-pin" style="color:#1e3a5f;"></i> Asset Location Map</h3>
+                <div id="map"></div>
+                <div class="map-legend">
+                    <span><span class="map-legend-dot" style="background:#dc2626;"></span> Critical</span>
+                    <span><span class="map-legend-dot" style="background:#f59e0b;"></span> Warning</span>
+                    <span><span class="map-legend-dot" style="background:#10b981;"></span> Good</span>
+                    <span><span class="map-legend-dot" style="background:#6b7280;"></span> Offline</span>
+                </div>
             </div>
         </div>
     </div>
-
+    <div id="demoModal">
+        <div class="modal-content">
+            <button class="modal-close" onclick="closeDemo()">✕</button>
+            <h2>📸 Dashboard Preview</h2>
+            <p class="sub">Here's what the dashboard looks like with real data</p>
+            <div class="screenshot-grid">
+                <div class="screenshot-item">
+                    <img src="https://raw.githubusercontent.com/LogicLegion/Fleetintel/main/Fleetintel0.png" alt="Dashboard screenshot 1">
+                    <div class="caption">📊 KPI Cards &amp; Table View</div>
+                </div>
+                <div class="screenshot-item">
+                    <img src="https://raw.githubusercontent.com/LogicLegion/Fleetintel/main/Fleetintel1.png" alt="Dashboard screenshot 2">
+                    <div class="caption">🗺️ Map View with Color-Coded Markers</div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button onclick="closeDemo()">Close</button>
+            </div>
+        </div>
+    </div>
+    <div id="toast" class="toast"></div>
     <script>
-        var sessionId = '{{ session_id }}';
-        var isProcessing = false;
-        var uploadedFileContent = null;
-        var uploadedFileName = '';
-        var recognition = null;
-        var isListening = false;
-
-        // ===== VISITOR COUNTER =====
-        (function() {
-            fetch('https://api.countapi.xyz/hit/cypher-yaps.onrender.com/visits')
-                .then(function(res) { return res.json(); })
-                .then(function(data) {
-                    document.getElementById('visitorCount').textContent = data.value;
-                })
-                .catch(function() {
-                    document.getElementById('visitorCount').textContent = '—';
-                });
-        })();
-
-        // ===== SHARE =====
-        function shareCypher() {
-            const url = 'https://cypher-yaps.onrender.com';
-            const text = '⚖️ Cypher — The AI judge that tells the truth. No sugarcoating. No lies. Try it free:';
-            
-            if (navigator.share) {
-                navigator.share({
-                    title: 'Cypher - AI Judge',
-                    text: text,
-                    url: url
-                }).catch(function(err) {
-                    if (err.name !== 'AbortError') {
-                        fallbackShare(url, text);
-                    }
-                });
-            } else {
-                fallbackShare(url, text);
-            }
-        }
-
-        function fallbackShare(url, text) {
-            const fullText = text + ' ' + url;
-            if (navigator.clipboard) {
-                navigator.clipboard.writeText(fullText).then(function() {
-                    showToast('✅ Link copied to clipboard! Share it anywhere.');
-                }).catch(function() {
-                    promptShare(fullText);
-                });
-            } else {
-                promptShare(fullText);
-            }
-        }
-
-        function promptShare(text) {
-            const input = prompt('Copy this link and share it:', text);
-            if (input !== null) {
-                showToast('✅ Thanks for sharing!');
-            }
-        }
-
-        // ===== FUSION INFO UPDATE =====
-        function updateFusionInfo() {
-            const preset = document.getElementById('fusionPreset').value;
-            const info = {
-                'cypher_max': '🧠 GLM-5.3 · DeepSeek V4 Pro · Qwen3.8-Max',
-                'cypher_lite': '⚡ DeepSeek V4 Flash · Qwen3.8-27b'
-            };
-            document.getElementById('fusionInfo').textContent = info[preset] || '';
-        }
-
-        // ===== TOGGLE GRADE SELECTOR =====
-        function toggleGradeSelector() {
-            const personality = document.getElementById('personalitySelect').value;
-            const gradeSelector = document.getElementById('gradeSelector');
-            if (personality === 'teacher') {
-                gradeSelector.classList.add('visible');
-            } else {
-                gradeSelector.classList.remove('visible');
-            }
-        }
-
-        // ===== VOICE =====
-        function startVoice() {
-            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-                alert('Voice recognition is not supported in this browser. Please use Chrome, Edge, or Safari.');
-                return;
-            }
-
-            var voiceBtn = document.getElementById('voiceBtn');
-            
-            if (isListening) {
-                if (recognition) { recognition.stop(); }
-                isListening = false;
-                voiceBtn.classList.remove('listening');
-                voiceBtn.textContent = '🎤';
-                return;
-            }
-
-            var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            recognition = new SpeechRecognition();
-            recognition.lang = 'en-US';
-            recognition.continuous = false;
-            recognition.interimResults = true;
-
-            recognition.onstart = function() {
-                isListening = true;
-                voiceBtn.classList.add('listening');
-                voiceBtn.textContent = '🔴';
-            };
-
-            recognition.onresult = function(event) {
-                var transcript = '';
-                for (var i = event.resultIndex; i < event.results.length; i++) {
-                    transcript += event.results[i][0].transcript;
-                    if (event.results[i].isFinal) {
-                        document.getElementById('userInput').value = transcript;
-                        setTimeout(function() { sendMessage(); }, 300);
-                    } else {
-                        document.getElementById('userInput').value = transcript;
-                    }
-                }
-            };
-
-            recognition.onerror = function(event) {
-                isListening = false;
-                voiceBtn.classList.remove('listening');
-                voiceBtn.textContent = '🎤';
-                if (event.error === 'not-allowed') {
-                    alert('Please allow microphone access to use voice input.');
-                } else if (event.error === 'no-speech') {
-                    // Silently handle no speech
-                } else {
-                    alert('Voice recognition error: ' + event.error);
-                }
-            };
-
-            recognition.onend = function() {
-                isListening = false;
-                voiceBtn.classList.remove('listening');
-                voiceBtn.textContent = '🎤';
-            };
-
-            recognition.start();
-        }
-
-        // ===== FILE UPLOAD =====
-        function handleFileUpload(event) {
-            var file = event.target.files[0];
-            if (!file) return;
-            var fileInfo = document.getElementById('fileInfo');
-            var fileText = document.getElementById('fileText');
-            var fileIcon = document.getElementById('fileIcon');
-            fileText.textContent = file.name + ' (processing...)';
-            fileIcon.textContent = '⏳';
-            fileInfo.textContent = 'Processing...';
-            var reader = new FileReader();
-            
-            if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
-                reader.onload = function(e) {
-                    try {
-                        var base64 = btoa(e.target.result);
-                        fetch('/extract-pdf', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ file: base64, name: file.name })
-                        })
-                        .then(function(res) { return res.json(); })
-                        .then(function(data) {
-                            if (data.error) { alert('Error: ' + data.error); return; }
-                            uploadedFileContent = data.text;
-                            uploadedFileName = file.name;
-                            fileText.textContent = file.name + ' ✅';
-                            fileIcon.textContent = '✅';
-                            fileInfo.textContent = 'PDF processed!';
-                            document.getElementById('fileInput').value = '';
-                        })
-                        .catch(function(err) { alert('Error: ' + err.message); });
-                    } catch(err) { alert('Error: ' + err.message); }
-                };
-                reader.readAsArrayBuffer(file);
-                return;
-            }
-            
-            reader.onload = function(e) {
-                var content = e.target.result;
-                uploadedFileContent = content;
-                uploadedFileName = file.name;
-                fileText.textContent = file.name + ' ✅';
-                fileIcon.textContent = '✅';
-                fileInfo.textContent = content.length + ' characters loaded!';
-                document.getElementById('fileInput').value = '';
-            };
-            reader.readAsText(file);
-        }
-
-        // ===== SEND MESSAGE =====
-        function sendMessage(editedMsg) {
-            if (isProcessing) return;
-            var input = document.getElementById('userInput');
-            var msg = editedMsg || input.value.trim();
-            if (!msg) return;
-            
-            // Add grade context if teacher mode
-            var personality = document.getElementById('personalitySelect').value;
-            if (personality === 'teacher') {
-                var grade = document.getElementById('gradeSelect').value;
-                msg = "[Grade " + grade + " student] " + msg;
-            }
-            
-            isProcessing = true;
-            if (!editedMsg) {
-                input.value = '';
-                input.disabled = true;
-                document.getElementById('sendBtn').disabled = true;
-                document.getElementById('voiceBtn').disabled = true;
-            }
-            var chatArea = document.getElementById('chatArea');
-            chatArea.classList.add('has-messages');
-            var container = document.getElementById('messages');
-            var userDiv = document.createElement('div');
-            userDiv.className = 'message user';
-            var displayMsg = msg;
-            if (uploadedFileContent) { displayMsg = msg + '\\n\\n[Evidence: ' + uploadedFileName + ']'; }
-            userDiv.innerHTML = '<div class="role">You</div><div class="content">' + escapeHtml(displayMsg) + '</div>';
-            container.appendChild(userDiv);
-            document.getElementById('typing').style.display = 'block';
-            scrollToBottom();
-            var payload = {
-                message: msg,
-                session: sessionId,
-                personality: personality,
-                web_search: document.getElementById('webSearchToggle').checked,
-                fusion_preset: document.getElementById('fusionPreset').value
-            };
-            if (uploadedFileContent) {
-                payload.file_content = uploadedFileContent;
-                payload.file_name = uploadedFileName;
-            }
-            fetch('/chat', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            })
-            .then(function(res) { return res.json(); })
-            .then(function(data) {
-                document.getElementById('typing').style.display = 'none';
-                if (data.error) {
-                    var errDiv = document.createElement('div');
-                    errDiv.className = 'message bot';
-                    errDiv.innerHTML = '<div class="role">Cypher</div><div class="content" style="color:#f85149;">' + escapeHtml(data.error) + '</div>';
-                    container.appendChild(errDiv);
-                } else {
-                    var botDiv = document.createElement('div');
-                    botDiv.className = 'message bot';
-                    var presetInfo = data.preset_used ? ' (' + data.preset_used + ')' : '';
-                    botDiv.innerHTML = '<div class="role">Cypher' + presetInfo + '</div><div class="content">' + (data.html_reply || escapeHtml(data.reply)) + '</div>';
-                    container.appendChild(botDiv);
-                }
-                if (!editedMsg) {
-                    input.disabled = false;
-                    document.getElementById('sendBtn').disabled = false;
-                    document.getElementById('voiceBtn').disabled = false;
-                }
-                isProcessing = false;
-                scrollToBottom();
-                if (!editedMsg) input.focus();
-            })
-            .catch(function(err) {
-                document.getElementById('typing').style.display = 'none';
-                var errDiv = document.createElement('div');
-                errDiv.className = 'message bot';
-                errDiv.innerHTML = '<div class="role">Cypher</div><div class="content" style="color:#f85149;">Connection error. Please refresh.</div>';
-                container.appendChild(errDiv);
-                if (!editedMsg) {
-                    input.disabled = false;
-                    document.getElementById('sendBtn').disabled = false;
-                    document.getElementById('voiceBtn').disabled = false;
-                }
-                isProcessing = false;
-                scrollToBottom();
-            });
-        }
-
-        // ===== CLEAR CHAT =====
-        function clearChat() {
-            if (!confirm('Clear the proceedings?')) return;
-            fetch('/clear', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session: sessionId })
-            }).then(function() {
-                document.getElementById('messages').innerHTML = '';
-                document.getElementById('chatArea').classList.remove('has-messages');
-                document.getElementById('userInput').focus();
-            });
-        }
-
-        // ===== START NEW CHAT =====
-        function startNewChat() {
-            if (confirm('Start a new case?')) {
-                clearChat();
-                uploadedFileContent = null;
-                uploadedFileName = '';
-                document.getElementById('fileText').textContent = 'Upload evidence (PDF, CSV, TXT)';
-                document.getElementById('fileIcon').textContent = '📁';
-                document.getElementById('fileInfo').textContent = '';
-                document.getElementById('fileInput').value = '';
-            }
-        }
-
-        // ===== TOAST =====
-        function showToast(message) {
-            var toast = document.getElementById('toast');
-            if (!toast) {
-                toast = document.createElement('div');
-                toast.id = 'toast';
-                toast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:#10b981;color:white;padding:12px 24px;border-radius:48px;font-size:14px;z-index:1000;display:none;box-shadow:0 8px 16px rgba(0,0,0,0.2);';
-                document.body.appendChild(toast);
-            }
-            toast.textContent = message;
-            toast.style.display = 'block';
-            setTimeout(function() { toast.style.display = 'none'; }, 3000);
-        }
-
-        // ===== HELPERS =====
-        function escapeHtml(text) {
-            var div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
-        }
-
-        function scrollToBottom() {
-            var area = document.getElementById('chatArea');
-            area.scrollTop = area.scrollHeight;
-        }
-
-        // ===== INIT =====
-        toggleGradeSelector();
-        updateFusionInfo();
+        let allData = []; let currentSort = { column: 'loss', direction: 'desc' }; let map = null; const TRANSACTION_VALUE = 5;
+        function showToast(msg) { let t = document.getElementById('toast'); t.textContent = msg; t.style.display = 'block'; setTimeout(() => t.style.display = 'none', 3000); }
+        function getStatus(r) { let rej = parseFloat(r.Reject7Day) || 0; let uptime = parseFloat(r.Uptime7Day) || 100; if (r.KioskState === 'Offline' || uptime < 10) return 'Offline'; if (rej >= 8) return 'Critical'; if (rej >= 4) return 'Warning'; return 'Good'; }
+        function getStatusBadge(r) { let s = getStatus(r); const map = { 'Critical': '<span class="badge badge-critical">Critical</span>', 'Warning': '<span class="badge badge-warning">Warning</span>', 'Offline': '<span class="badge badge-offline">Offline</span>', 'Good': '<span class="badge badge-good">Good</span>' }; return map[s] || map['Good']; }
+        function getVolume(r) { return parseFloat(r.Tx1Day) || 0; }
+        function getReject(r) { return parseFloat(r.Reject7Day) || 0; }
+        function getUptime(r) { return parseFloat(r.Uptime7Day) || 100; }
+        function getEstRevenue(r) { return getVolume(r) * TRANSACTION_VALUE; }
+        function calcLoss(r) { let vol = getVolume(r); let rej = getReject(r); let uptime = getUptime(r); return (vol * (rej / 100) * TRANSACTION_VALUE) + (vol * ((100 - uptime) / 100) * 4); }
+        function getRegion(r) { return r.Province || r.State || 'Unknown'; }
+        function getDaysSinceService(r) { let d = r.LastPM || ''; if (!d || d === '—') return null; try { let parts = d.match(/(\\d{2})\\/(\\d{2})\\/(\\d{2})/); if (parts) { let date = new Date(2000 + parseInt(parts[3]), parseInt(parts[1]) - 1, parseInt(parts[2])); return Math.ceil((new Date() - date) / 86400000); } } catch (e) {} return null; }
+        function getPhoneNumber(r) { return r.Phone || r['Store Phone Number'] || ''; }
+        function escapeHtml(s) { if (!s) return ''; return s.replace(/[&<>]/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[m]); }
+        function parseCSV(text) { const lines = text.split(/\\r?\\n/); if (lines.length < 2) return false; let headers = lines[0].split(',').map(h => h.replace(/"/g, '').trim()); let data = []; for (let i = 1; i < lines.length; i++) { if (!lines[i].trim()) continue; let row = {}, col = 0, cur = '', inQ = false; for (let ch of lines[i]) { if (ch === '"') inQ = !inQ; else if (ch === ',' && !inQ) { row[headers[col]] = cur.trim().replace(/"/g, ''); cur = ''; col++; } else cur += ch; } if (col < headers.length) row[headers[col]] = cur.trim().replace(/"/g, ''); if (Object.keys(row).length) data.push(row); } if (!data.length) return false; allData = data.map(row => ({ Store: row.Store || row['Store Name'] || 'Unknown', Address: row.Address || '', City: row.City || '', Province: row.State || row.Province || '', KioskState: row['Kiosk State'] || row.State || 'Attract', Tx1Day: row['1 Day TX'] || row.Volume || '0', Tx7Day: row['7 Day TX'] || '0', Reject7Day: row['7 Day Reject %'] || row.Reject7Day || '0', Uptime7Day: row['7 Day Uptime %'] || row.Uptime || '100', LastPM: row['Last PM Date'] || row['Last Service Date'] || '', Phone: row['Store Phone Number'] || row.Phone || '', Latitude: row.Latitude || '', Longitude: row.Longitude || '' })); return true; }
+        function filterData() { let f = [...allData]; let region = document.getElementById('regionFilter')?.value || 'all'; if (region !== 'all') f = f.filter(r => getRegion(r) === region); let status = document.getElementById('statusFilter')?.value || 'all'; if (status !== 'all') f = f.filter(r => getStatus(r).toLowerCase() === status); let search = document.getElementById('searchInput')?.value.toLowerCase() || ''; if (search) f = f.filter(r => (r.Store || '').toLowerCase().includes(search) || (r.City || '').toLowerCase().includes(search) || (r.Address || '').toLowerCase().includes(search)); return f; }
+        function sortData(d) { return [...d].sort((a, b) => { let va = calcLoss(a), vb = calcLoss(b); return currentSort.direction === 'desc' ? vb - va : va - vb; }); }
+        function renderAll() { if (!allData.length) return; let f = filterData(); f = sortData(f); const total = f.length; const crit = f.filter(r => getStatus(r) === 'Critical').length; const warn = f.filter(r => getStatus(r) === 'Warning').length; const tLoss = f.reduce((s, r) => s + calcLoss(r), 0); document.getElementById('kpiTotal').textContent = total; document.getElementById('kpiCritical').textContent = crit; document.getElementById('kpiWarning').textContent = warn; document.getElementById('kpiLoss').textContent = '$' + tLoss.toFixed(0); const tbody = document.getElementById('tableBody'); if (!f.length) { tbody.innerHTML = '<tr><td colspan="12">No assets found</td></tr>'; return; } tbody.innerHTML = f.map(r => { const name = r.Store || '—'; const phone = getPhoneNumber(r); const callBtn = phone ? `<button class="call-btn" style="background:#e8edf5;border:none;padding:4px 10px;border-radius:30px;cursor:pointer;" onclick="window.location.href='tel:${phone}'">📞</button>` : '—'; const loss = calcLoss(r); const reject = getReject(r); const uptime = getUptime(r); const revenue = getEstRevenue(r); const status = getStatus(r); const serviceDays = getDaysSinceService(r); const rowClass = status === 'Critical' ? 'critical-row' : status === 'Warning' ? 'warning-row' : status === 'Offline' ? 'offline-row' : 'good-row'; return `<tr class="${rowClass}"><td><strong>${escapeHtml(name)}</strong></td><td>${escapeHtml(r.Address || '—')}</td><td>${escapeHtml(r.City || '—')}</td><td>${escapeHtml(getRegion(r))}</td><td>${getStatusBadge(r)}</td><td>${getVolume(r)}</td><td style="color:${reject>=8?'#dc2626':reject>=4?'#f59e0b':'#10b981'}; font-weight:600;">${reject.toFixed(1)}%</td><td style="color:${uptime<80?'#dc2626':uptime<95?'#f59e0b':'#10b981'}; font-weight:600;">${uptime.toFixed(1)}%</td><td>$${revenue.toFixed(0)}</td><td style="color:#dc2626; font-weight:700;">$${loss.toFixed(0)}</td><td>${serviceDays !== null ? serviceDays + 'd' : '—'}</td><td>${callBtn}</td></tr>`; }).join(''); updateMap(f); populateFilters(); }
+        function updateMap(data) { if (map) map.remove(); map = L.map('map').setView([56.1304, -106.3468], 4); L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', { attribution: 'OSM' }).addTo(map); let bounds = []; data.forEach(r => { let lat = parseFloat(r.Latitude); let lng = parseFloat(r.Longitude); if (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) { let s = getStatus(r); let color = s === 'Critical' ? '#dc2626' : s === 'Warning' ? '#f59e0b' : s === 'Offline' ? '#6b7280' : '#10b981'; L.circleMarker([lat, lng], { radius: 9, fillColor: color, color: '#fff', weight: 2, opacity: 1 }).addTo(map).bindPopup(`<b>${escapeHtml(r.Store)}</b><br>Loss: $${calcLoss(r).toFixed(0)}`); bounds.push([lat, lng]); } }); if (bounds.length) map.fitBounds(bounds); else map.fitBounds([[42, -79], [50, -60]]); setTimeout(() => map.invalidateSize(), 100); }
+        function populateFilters() { if (!allData.length) return; const regions = [...new Set(allData.map(r => getRegion(r)))].filter(r => r && r !== 'Unknown'); const sel = document.getElementById('regionFilter'); const current = sel.value; sel.innerHTML = '<option value="all">All</option>' + regions.sort().map(p => `<option value="${p}">${p}</option>`).join(''); if ([...sel.options].some(o => o.value === current)) sel.value = current; }
+        function takeScreenshot() { if (!allData.length) return showToast('No data'); showToast('Capturing...'); html2canvas(document.getElementById('dashboard')).then(canvas => { let link = document.createElement('a'); link.download = 'dashboard_' + Date.now() + '.png'; link.href = canvas.toDataURL(); link.click(); showToast('Screenshot saved'); }).catch(() => showToast('Failed')); }
+        function downloadReport() { if (!allData.length) return showToast('No data'); showToast('Generating report...'); html2canvas(document.getElementById('dashboard'), { scale: 2, backgroundColor: '#f0f4fb' }).then(canvas => { let link = document.createElement('a'); link.download = 'fleet_report_' + Date.now() + '.png'; link.href = canvas.toDataURL(); link.click(); showToast('Report saved'); }).catch(() => showToast('Failed')); }
+        function openDemo() { document.getElementById('demoModal').style.display = 'flex'; document.body.style.overflow = 'hidden'; }
+        function closeDemo() { document.getElementById('demoModal').style.display = 'none'; document.body.style.overflow = 'auto'; }
+        document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('viewDemoBtn').addEventListener('click', openDemo);
+            document.getElementById('demoModal').addEventListener('click', function(e) { if (e.target === this) closeDemo(); });
+            document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeDemo(); });
+            document.getElementById('uploadBtn').addEventListener('click', () => document.getElementById('csvFile').click());
+            document.getElementById('uploadBtn2').addEventListener('click', () => document.getElementById('csvFile').click());
+            document.getElementById('csvFile').addEventListener('change', function(e) { if (!e.target.files || !e.target.files[0]) return; const file = e.target.files[0]; document.getElementById('fileStatus').textContent = 'Loading: ' + file.name; if (!file.name.endsWith('.csv')) { showToast('Please upload a CSV file'); return; } const reader = new FileReader(); reader.onload = function(ev) { if (parseCSV(ev.target.result)) { document.getElementById('uploadCard').style.display = 'none'; document.getElementById('dashboard').style.display = 'block'; document.getElementById('dataTimestamp').textContent = '📅 ' + new Date().toLocaleString() + ' — ' + allData.length + ' assets'; populateFilters(); renderAll(); showToast('Loaded ' + allData.length + ' assets'); } else showToast('Invalid CSV format'); }; reader.readAsText(file); });
+            document.getElementById('loadSampleBtn').addEventListener('click', function() { fetch('/load-sample').then(response => response.text()).then(csvData => { if (parseCSV(csvData)) { document.getElementById('uploadCard').style.display = 'none'; document.getElementById('dashboard').style.display = 'block'; document.getElementById('dataTimestamp').textContent = '📅 ' + new Date().toLocaleString() + ' — Sample Data — ' + allData.length + ' assets'; populateFilters(); renderAll(); showToast('🚀 Sample data loaded!'); } else { showToast('Failed to load sample data'); } }).catch(() => showToast('Error loading sample data')); });
+            document.getElementById('resetBtn').addEventListener('click', function() { document.getElementById('regionFilter').value = 'all'; document.getElementById('statusFilter').value = 'all'; document.getElementById('searchInput').value = ''; renderAll(); });
+            document.getElementById('searchInput').addEventListener('input', renderAll);
+            document.getElementById('regionFilter').addEventListener('change', renderAll);
+            document.getElementById('statusFilter').addEventListener('change', renderAll);
+            document.getElementById('screenshotBtn').addEventListener('click', takeScreenshot);
+            document.getElementById('reportBtn').addEventListener('click', downloadReport);
+            console.log('🚀 Fleet Intelligence Dashboard loaded');
+        });
     </script>
 </body>
 </html>
 """
 
+# ============================================================
+# ROUTES
+# ============================================================
 
 @app.route('/')
-def home():
-    if 'session_id' not in session:
-        session['session_id'] = f"user_{int(time.time())}_{os.urandom(4).hex()}"
-    return render_template_string(
-        HTML_TEMPLATE,
-        bot_name=BOT_NAME,
-        session_id=session['session_id']
-    )
+def index():
+    return render_template_string(LANDING_TEMPLATE)
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        password = request.form.get('password')
+        user = User.query.filter_by(username=username).first()
+        if user and bcrypt.check_password_hash(user.password, password):
+            login_user(user)
+            return redirect(url_for('dashboard'))
+        return render_template_string(LOGIN_TEMPLATE, error="Invalid username or password")
+    return render_template_string(LOGIN_TEMPLATE, error=None)
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = request.form.get('username')
+        email = request.form.get('email')
+        password = request.form.get('password')
+        existing = User.query.filter_by(username=username).first()
+        if existing:
+            return render_template_string(REGISTER_TEMPLATE, error="Username already taken")
+        hashed = bcrypt.generate_password_hash(password).decode('utf-8')
+        new_user = User(username=username, email=email, password=hashed)
+        db.session.add(new_user)
+        db.session.commit()
+        login_user(new_user)
+        return redirect(url_for('dashboard'))
+    return render_template_string(REGISTER_TEMPLATE, error=None)
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('login'))
+
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    return render_template_string(DASHBOARD_TEMPLATE)
+
+@app.route('/load-sample')
+@login_required
+def load_sample():
+    return SAMPLE_CSV
 
 @app.route('/ping')
 def ping():
-    return jsonify({'status': 'ok', 'bot_name': BOT_NAME, 'fusion': 'Cypher Fusion (Non-US)'})
-
-
-@app.route('/extract-pdf', methods=['POST'])
-def extract_pdf():
-    try:
-        data = request.json
-        file_content = data.get('file', '')
-        file_name = data.get('name', 'file.pdf')
-        result = extract_text_from_pdf(file_content, file_name)
-        return jsonify({'text': result})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/chat', methods=['POST'])
-def chat():
-    global total_tokens_used, total_cost_usd
-    
-    # ===== CHECK DAILY LIMIT =====
-    ip = get_client_ip()
-    today = datetime.now().strftime('%Y-%m-%d')
-    key = f"{ip}_{today}"
-    
-    # Clean old entries (keep only today's data)
-    for k in list(daily_usage.keys()):
-        if not k.endswith(today):
-            del daily_usage[k]
-    
-    if key in daily_usage and daily_usage[key] >= MAX_DAILY_MESSAGES:
-        return jsonify({
-            'error': f'Daily limit reached ({MAX_DAILY_MESSAGES} messages). Please try again tomorrow.'
-        }), 429
-    
-    # ===== PROCESS CHAT =====
-    data = request.json
-    user_message = data.get('message', '').strip()
-    session_id = data.get('session', session.get('session_id', 'default'))
-    personality = data.get('personality', 'default')
-    web_search = data.get('web_search', True)
-    fusion_preset = data.get('fusion_preset', 'cypher_max')
-    file_content = data.get('file_content', '')
-    file_name = data.get('file_name', '')
-
-    if not user_message:
-        return jsonify({'error': 'No case presented.'}), 400
-
-    if session_id not in chat_histories:
-        chat_histories[session_id] = []
-
-    history = chat_histories[session_id]
-    personality_prompt = PERSONALITIES.get(personality, PERSONALITIES['default'])
-    
-    if file_content:
-        personality_prompt += f"\n\nThe user submitted evidence named '{file_name}' with this content:\n\n{file_content[:6000]}\n\nUse this as evidence. If it's irrelevant, state that plainly."
-
-    messages = [
-        {"role": "system", "content": personality_prompt},
-        {"role": "system", "content": "You are Cypher. Deliver one definitive ruling. No hedging. No check again. Just the verdict."},
-        {"role": "system", "content": "If you're uncertain, state your confidence as a percentage. If you don't know, say I don't know."}
-    ]
-    messages.extend(history[-6:])
-    messages.append({"role": "user", "content": user_message})
-
-    preset = CYPHER_PRESETS.get(fusion_preset, CYPHER_PRESETS["cypher_max"])
-    
-    try:
-        payload = {
-            "model": "openrouter/fusion",
-            "plugins": [{
-                "id": "fusion",
-                "analysis_models": preset["panel"],
-                "model": preset["judge"]
-            }],
-            "messages": messages,
-            "temperature": 0.15,
-            "max_tokens": 500,
-            "top_p": 0.85,
-        }
-        if web_search:
-            payload["tools"] = [{"type": "openrouter:web_search"}]
-
-        response = requests.post(
-            url="https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {YOUR_API_KEY}",
-                "Content-Type": "application/json",
-                "X-OpenRouter-Cache": "true",
-            },
-            json=payload,
-            timeout=60
-        )
-
-        if response.status_code != 200:
-            error_msg = response.json().get('error', {}).get('message', 'API error')
-            return jsonify({'error': f'Cypher Fusion Error: {error_msg}'})
-
-        result = response.json()
-        if not result or 'choices' not in result or not result['choices']:
-            return jsonify({'error': 'Cypher gave no ruling.'})
-        
-        bot_reply = result['choices'][0]['message']['content']
-        if not bot_reply:
-            return jsonify({'error': 'No verdict generated.'})
-        
-        bot_reply = clean_claude_hedging(bot_reply)
-        if not bot_reply.startswith(("Verdict:", "Ruling:", "Confidence:", "I don't know")):
-            bot_reply = f"Ruling: {bot_reply}"
-        
-        html_reply = markdown.markdown(bot_reply, extensions=['tables', 'fenced_code'])
-        html_reply = bleach.clean(html_reply, strip=True)
-        
-        usage = result.get('usage', {})
-        total_tokens_used += usage.get('total_tokens', 0)
-        total_cost_usd += 0.0001
-        
-        message_id = f"{session_id}_{int(time.time())}_{len(history)}"
-        history.append({"role": "user", "content": user_message})
-        history.append({"role": "assistant", "content": bot_reply})
-        if len(history) > 12:
-            history = history[-12:]
-            chat_histories[session_id] = history
-        
-        # ===== INCREMENT DAILY USAGE =====
-        daily_usage[key] = daily_usage.get(key, 0) + 1
-        
-        preset_name = preset["name"].split(" ")[0] + " " + preset["name"].split(" ")[1] if len(preset["name"].split(" ")) > 1 else preset["name"]
-        return jsonify({
-            'reply': bot_reply,
-            'html_reply': html_reply,
-            'message_id': message_id,
-            'preset_used': preset_name,
-            'score': preset["score"],
-            'remaining': MAX_DAILY_MESSAGES - daily_usage[key]
-        })
-    except requests.exceptions.Timeout:
-        return jsonify({'error': 'Cypher Fusion timed out.'})
-    except Exception as e:
-        return jsonify({'error': str(e)})
-
-
-@app.route('/feedback', methods=['POST'])
-def feedback():
-    try:
-        data = request.json
-        message_id = data.get('message_id')
-        value = data.get('value')
-        if not message_id or value not in [1, -1]:
-            return jsonify({'error': 'Invalid feedback'}), 400
-        if 'feedback_data' not in chat_histories:
-            chat_histories['feedback_data'] = {}
-        chat_histories['feedback_data'][message_id] = value
-        return jsonify({'status': 'ok'})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/clear', methods=['POST'])
-def clear():
-    session_id = request.json.get('session', session.get('session_id', 'default'))
-    if session_id in chat_histories:
-        chat_histories[session_id] = []
-    return jsonify({'status': 'ok'})
-
+    return jsonify({'status': 'ok', 'bot_name': BOT_NAME})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=os.getenv('PORT', 5000), debug=False)
