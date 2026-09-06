@@ -851,4 +851,413 @@ HTML_TEMPLATE = """
                 for (var i = event.resultIndex; i < event.results.length; i++) {
                     transcript += event.results[i][0].transcript;
                     if (event.results[i].isFinal) {
-                       
+                        document.getElementById('userInput').value = transcript;
+                        setTimeout(function() { sendMessage(); }, 300);
+                    } else {
+                        document.getElementById('userInput').value = transcript;
+                    }
+                }
+            };
+
+            recognition.onerror = function(event) {
+                isListening = false;
+                voiceBtn.classList.remove('listening');
+                voiceBtn.textContent = '🎤';
+                if (event.error === 'not-allowed') {
+                    alert('Please allow microphone access to use voice input.');
+                } else if (event.error === 'no-speech') {
+                    // Silently handle no speech
+                } else {
+                    alert('Voice recognition error: ' + event.error);
+                }
+            };
+
+            recognition.onend = function() {
+                isListening = false;
+                voiceBtn.classList.remove('listening');
+                voiceBtn.textContent = '🎤';
+            };
+
+            recognition.start();
+        }
+
+        // ===== FILE UPLOAD =====
+        function handleFileUpload(event) {
+            var file = event.target.files[0];
+            if (!file) return;
+            var fileInfo = document.getElementById('fileInfo');
+            var fileText = document.getElementById('fileText');
+            var fileIcon = document.getElementById('fileIcon');
+            fileText.textContent = file.name + ' (processing...)';
+            fileIcon.textContent = '⏳';
+            fileInfo.textContent = 'Processing...';
+            var reader = new FileReader();
+            
+            if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+                reader.onload = function(e) {
+                    try {
+                        var base64 = btoa(e.target.result);
+                        fetch('/extract-pdf', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ file: base64, name: file.name })
+                        })
+                        .then(function(res) { return res.json(); })
+                        .then(function(data) {
+                            if (data.error) { alert('Error: ' + data.error); return; }
+                            uploadedFileContent = data.text;
+                            uploadedFileName = file.name;
+                            fileText.textContent = file.name + ' ✅';
+                            fileIcon.textContent = '✅';
+                            fileInfo.textContent = 'PDF processed!';
+                            document.getElementById('fileInput').value = '';
+                        })
+                        .catch(function(err) { alert('Error: ' + err.message); });
+                    } catch(err) { alert('Error: ' + err.message); }
+                };
+                reader.readAsArrayBuffer(file);
+                return;
+            }
+            
+            reader.onload = function(e) {
+                var content = e.target.result;
+                uploadedFileContent = content;
+                uploadedFileName = file.name;
+                fileText.textContent = file.name + ' ✅';
+                fileIcon.textContent = '✅';
+                fileInfo.textContent = content.length + ' characters loaded!';
+                document.getElementById('fileInput').value = '';
+            };
+            reader.readAsText(file);
+        }
+
+        // ===== SEND MESSAGE =====
+        function sendMessage(editedMsg) {
+            if (isProcessing) return;
+            var input = document.getElementById('userInput');
+            var msg = editedMsg || input.value.trim();
+            if (!msg) return;
+            
+            // Add grade context if teacher mode
+            var personality = document.getElementById('personalitySelect').value;
+            if (personality === 'teacher') {
+                var grade = document.getElementById('gradeSelect').value;
+                msg = "[Grade " + grade + " student] " + msg;
+            }
+            
+            isProcessing = true;
+            if (!editedMsg) {
+                input.value = '';
+                input.disabled = true;
+                document.getElementById('sendBtn').disabled = true;
+                document.getElementById('voiceBtn').disabled = true;
+            }
+            var chatArea = document.getElementById('chatArea');
+            chatArea.classList.add('has-messages');
+            var container = document.getElementById('messages');
+            var userDiv = document.createElement('div');
+            userDiv.className = 'message user';
+            var displayMsg = msg;
+            if (uploadedFileContent) { displayMsg = msg + '\\n\\n[Evidence: ' + uploadedFileName + ']'; }
+            userDiv.innerHTML = '<div class="role">You</div><div class="content">' + escapeHtml(displayMsg) + '</div>';
+            container.appendChild(userDiv);
+            document.getElementById('typing').style.display = 'block';
+            scrollToBottom();
+            var payload = {
+                message: msg,
+                session: sessionId,
+                personality: personality,
+                web_search: document.getElementById('webSearchToggle').checked,
+                fusion_preset: document.getElementById('fusionPreset').value
+            };
+            if (uploadedFileContent) {
+                payload.file_content = uploadedFileContent;
+                payload.file_name = uploadedFileName;
+            }
+            fetch('/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                document.getElementById('typing').style.display = 'none';
+                if (data.error) {
+                    var errDiv = document.createElement('div');
+                    errDiv.className = 'message bot';
+                    errDiv.innerHTML = '<div class="role">Cypher</div><div class="content" style="color:#f85149;">' + escapeHtml(data.error) + '</div>';
+                    container.appendChild(errDiv);
+                } else {
+                    var botDiv = document.createElement('div');
+                    botDiv.className = 'message bot';
+                    var presetInfo = data.preset_used ? ' (' + data.preset_used + ')' : '';
+                    botDiv.innerHTML = '<div class="role">Cypher' + presetInfo + '</div><div class="content">' + (data.html_reply || escapeHtml(data.reply)) + '</div>';
+                    container.appendChild(botDiv);
+                }
+                if (!editedMsg) {
+                    input.disabled = false;
+                    document.getElementById('sendBtn').disabled = false;
+                    document.getElementById('voiceBtn').disabled = false;
+                }
+                isProcessing = false;
+                scrollToBottom();
+                if (!editedMsg) input.focus();
+            })
+            .catch(function(err) {
+                document.getElementById('typing').style.display = 'none';
+                var errDiv = document.createElement('div');
+                errDiv.className = 'message bot';
+                errDiv.innerHTML = '<div class="role">Cypher</div><div class="content" style="color:#f85149;">Connection error. Please refresh.</div>';
+                container.appendChild(errDiv);
+                if (!editedMsg) {
+                    input.disabled = false;
+                    document.getElementById('sendBtn').disabled = false;
+                    document.getElementById('voiceBtn').disabled = false;
+                }
+                isProcessing = false;
+                scrollToBottom();
+            });
+        }
+
+        // ===== CLEAR CHAT =====
+        function clearChat() {
+            if (!confirm('Clear the proceedings?')) return;
+            fetch('/clear', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ session: sessionId })
+            }).then(function() {
+                document.getElementById('messages').innerHTML = '';
+                document.getElementById('chatArea').classList.remove('has-messages');
+                document.getElementById('userInput').focus();
+            });
+        }
+
+        // ===== START NEW CHAT =====
+        function startNewChat() {
+            if (confirm('Start a new case?')) {
+                clearChat();
+                uploadedFileContent = null;
+                uploadedFileName = '';
+                document.getElementById('fileText').textContent = 'Upload evidence (PDF, CSV, TXT)';
+                document.getElementById('fileIcon').textContent = '📁';
+                document.getElementById('fileInfo').textContent = '';
+                document.getElementById('fileInput').value = '';
+            }
+        }
+
+        // ===== TOAST =====
+        function showToast(message) {
+            var toast = document.getElementById('toast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'toast';
+                toast.style.cssText = 'position:fixed;bottom:24px;right:24px;background:#10b981;color:white;padding:12px 24px;border-radius:48px;font-size:14px;z-index:1000;display:none;box-shadow:0 8px 16px rgba(0,0,0,0.2);';
+                document.body.appendChild(toast);
+            }
+            toast.textContent = message;
+            toast.style.display = 'block';
+            setTimeout(function() { toast.style.display = 'none'; }, 3000);
+        }
+
+        // ===== HELPERS =====
+        function escapeHtml(text) {
+            var div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function scrollToBottom() {
+            var area = document.getElementById('chatArea');
+            area.scrollTop = area.scrollHeight;
+        }
+
+        // ===== INIT =====
+        toggleGradeSelector();
+        updateFusionInfo();
+    </script>
+</body>
+</html>
+"""
+
+
+@app.route('/')
+def home():
+    if 'session_id' not in session:
+        session['session_id'] = f"user_{int(time.time())}_{os.urandom(4).hex()}"
+    return render_template_string(
+        HTML_TEMPLATE,
+        bot_name=BOT_NAME,
+        session_id=session['session_id']
+    )
+
+
+@app.route('/ping')
+def ping():
+    return jsonify({'status': 'ok', 'bot_name': BOT_NAME, 'fusion': 'Cypher Fusion (Non-US)'})
+
+
+@app.route('/extract-pdf', methods=['POST'])
+def extract_pdf():
+    try:
+        data = request.json
+        file_content = data.get('file', '')
+        file_name = data.get('name', 'file.pdf')
+        result = extract_text_from_pdf(file_content, file_name)
+        return jsonify({'text': result})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/chat', methods=['POST'])
+def chat():
+    global total_tokens_used, total_cost_usd
+    
+    # ===== CHECK DAILY LIMIT =====
+    ip = get_client_ip()
+    today = datetime.now().strftime('%Y-%m-%d')
+    key = f"{ip}_{today}"
+    
+    # Clean old entries (keep only today's data)
+    for k in list(daily_usage.keys()):
+        if not k.endswith(today):
+            del daily_usage[k]
+    
+    if key in daily_usage and daily_usage[key] >= MAX_DAILY_MESSAGES:
+        return jsonify({
+            'error': f'Daily limit reached ({MAX_DAILY_MESSAGES} messages). Please try again tomorrow.'
+        }), 429
+    
+    # ===== PROCESS CHAT =====
+    data = request.json
+    user_message = data.get('message', '').strip()
+    session_id = data.get('session', session.get('session_id', 'default'))
+    personality = data.get('personality', 'default')
+    web_search = data.get('web_search', True)
+    fusion_preset = data.get('fusion_preset', 'cypher_max')
+    file_content = data.get('file_content', '')
+    file_name = data.get('file_name', '')
+
+    if not user_message:
+        return jsonify({'error': 'No case presented.'}), 400
+
+    if session_id not in chat_histories:
+        chat_histories[session_id] = []
+
+    history = chat_histories[session_id]
+    personality_prompt = PERSONALITIES.get(personality, PERSONALITIES['default'])
+    
+    if file_content:
+        personality_prompt += f"\n\nThe user submitted evidence named '{file_name}' with this content:\n\n{file_content[:6000]}\n\nUse this as evidence. If it's irrelevant, state that plainly."
+
+    messages = [
+        {"role": "system", "content": personality_prompt},
+        {"role": "system", "content": "You are Cypher. Deliver one definitive ruling. No hedging. No check again. Just the verdict."},
+        {"role": "system", "content": "If you're uncertain, state your confidence as a percentage. If you don't know, say I don't know."}
+    ]
+    messages.extend(history[-6:])
+    messages.append({"role": "user", "content": user_message})
+
+    preset = CYPHER_PRESETS.get(fusion_preset, CYPHER_PRESETS["cypher_max"])
+    
+    try:
+        payload = {
+            "model": "openrouter/fusion",
+            "plugins": [{
+                "id": "fusion",
+                "analysis_models": preset["panel"],
+                "model": preset["judge"]
+            }],
+            "messages": messages,
+            "temperature": 0.15,
+            "max_tokens": 500,
+            "top_p": 0.85,
+        }
+        if web_search:
+            payload["tools"] = [{"type": "openrouter:web_search"}]
+
+        response = requests.post(
+            url="https://openrouter.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {YOUR_API_KEY}",
+                "Content-Type": "application/json",
+                "X-OpenRouter-Cache": "true",
+            },
+            json=payload,
+            timeout=60
+        )
+
+        if response.status_code != 200:
+            error_msg = response.json().get('error', {}).get('message', 'API error')
+            return jsonify({'error': f'Cypher Fusion Error: {error_msg}'})
+
+        result = response.json()
+        if not result or 'choices' not in result or not result['choices']:
+            return jsonify({'error': 'Cypher gave no ruling.'})
+        
+        bot_reply = result['choices'][0]['message']['content']
+        if not bot_reply:
+            return jsonify({'error': 'No verdict generated.'})
+        
+        bot_reply = clean_claude_hedging(bot_reply)
+        if not bot_reply.startswith(("Verdict:", "Ruling:", "Confidence:", "I don't know")):
+            bot_reply = f"Ruling: {bot_reply}"
+        
+        html_reply = markdown.markdown(bot_reply, extensions=['tables', 'fenced_code'])
+        html_reply = bleach.clean(html_reply, strip=True)
+        
+        usage = result.get('usage', {})
+        total_tokens_used += usage.get('total_tokens', 0)
+        total_cost_usd += 0.0001
+        
+        message_id = f"{session_id}_{int(time.time())}_{len(history)}"
+        history.append({"role": "user", "content": user_message})
+        history.append({"role": "assistant", "content": bot_reply})
+        if len(history) > 12:
+            history = history[-12:]
+            chat_histories[session_id] = history
+        
+        # ===== INCREMENT DAILY USAGE =====
+        daily_usage[key] = daily_usage.get(key, 0) + 1
+        
+        preset_name = preset["name"].split(" ")[0] + " " + preset["name"].split(" ")[1] if len(preset["name"].split(" ")) > 1 else preset["name"]
+        return jsonify({
+            'reply': bot_reply,
+            'html_reply': html_reply,
+            'message_id': message_id,
+            'preset_used': preset_name,
+            'score': preset["score"],
+            'remaining': MAX_DAILY_MESSAGES - daily_usage[key]
+        })
+    except requests.exceptions.Timeout:
+        return jsonify({'error': 'Cypher Fusion timed out.'})
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
+
+@app.route('/feedback', methods=['POST'])
+def feedback():
+    try:
+        data = request.json
+        message_id = data.get('message_id')
+        value = data.get('value')
+        if not message_id or value not in [1, -1]:
+            return jsonify({'error': 'Invalid feedback'}), 400
+        if 'feedback_data' not in chat_histories:
+            chat_histories['feedback_data'] = {}
+        chat_histories['feedback_data'][message_id] = value
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/clear', methods=['POST'])
+def clear():
+    session_id = request.json.get('session', session.get('session_id', 'default'))
+    if session_id in chat_histories:
+        chat_histories[session_id] = []
+    return jsonify({'status': 'ok'})
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False, threaded=True)
