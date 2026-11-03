@@ -1,4 +1,4 @@
-from flask import Flask, render_template_string, request, redirect, url_for, jsonify, make_response
+from flask import Flask, render_template_string, request, redirect, url_for, jsonify, make_response, flash, get_flashed_messages
 from flask_sqlalchemy import SQLAlchemy
 from flask_bcrypt import Bcrypt
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -25,6 +25,7 @@ bcrypt = Bcrypt(app)
 login_manager = LoginManager(app)
 login_manager.login_view = 'login'
 login_manager.login_message = 'Please log in to access the dashboard.'
+login_manager.login_message_category = 'info'
 
 BOT_NAME = 'FleetIntel'
 
@@ -188,16 +189,18 @@ LOGIN_TEMPLATE = """
         .login-card .footer-text a { color: #1e3a5f; font-weight: 600; text-decoration: none; }
         .login-card .footer-text a:hover { text-decoration: underline; }
         .error { color: #dc2626; font-size: 14px; margin-bottom: 12px; background: #fef2f2; padding: 8px; border-radius: 8px; }
+        .info { color: #1e3a5f; font-size: 14px; margin-bottom: 12px; background: #eff6ff; padding: 8px; border-radius: 8px; }
     </style>
 </head>
 <body>
     <div class="login-card">
         <h1>📊 <span>FleetIntel</span></h1>
         <p class="sub">Sign in to your account</p>
+        {% for msg in get_flashed_messages() %}<div class="info">{{ msg }}</div>{% endfor %}
         {% if error %}<div class="error">{{ error }}</div>{% endif %}
         <form method="POST">
-            <input type="text" name="username" placeholder="Username" required>
-            <input type="password" name="password" placeholder="Password" required>
+            <input type="text" name="username" placeholder="Username or Email" required autocomplete="username">
+            <input type="password" name="password" placeholder="Password" required autocomplete="current-password">
             <button type="submit">Sign In</button>
         </form>
         <p class="footer-text">Don't have an account? <a href="{{ url_for('register') }}">Register</a></p>
@@ -237,9 +240,9 @@ REGISTER_TEMPLATE = """
         <p class="sub">Create your account</p>
         {% if error %}<div class="error">{{ error }}</div>{% endif %}
         <form method="POST">
-            <input type="text" name="username" placeholder="Username" required>
-            <input type="email" name="email" placeholder="Email" required>
-            <input type="password" name="password" placeholder="Password" required>
+            <input type="text" name="username" placeholder="Username" required autocomplete="username">
+            <input type="email" name="email" placeholder="Email" required autocomplete="email">
+            <input type="password" name="password" placeholder="Password" required autocomplete="new-password" minlength="6">
             <button type="submit">Create Account</button>
         </form>
         <p class="footer-text">Already have an account? <a href="{{ url_for('login') }}">Sign In</a></p>
@@ -248,9 +251,14 @@ REGISTER_TEMPLATE = """
 </html>
 """
 
-# [YOUR DASHBOARD_TEMPLATE STAYS EXACTLY AS IT WAS - I DIDN'T TOUCH IT]
-# Note: I kept the DASHBOARD_TEMPLATE variable out of this code block to save space, 
-# but you just paste your exact original HTML block back into its spot. 
+# ============================================================
+# DASHBOARD TEMPLATE
+# ⚠️  PASTE YOUR ORIGINAL DASHBOARD_TEMPLATE STRING HERE ⚠️
+# ============================================================
+# DASHBOARD_TEMPLATE = """
+# ... your original dashboard HTML ...
+# """
+
 
 # ============================================================
 # ROUTES
@@ -260,34 +268,62 @@ REGISTER_TEMPLATE = """
 def index():
     return render_template_string(LANDING_TEMPLATE)
 
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
-        user = User.query.filter_by(username=username).first()
+        identifier = (request.form.get('username') or '').strip()
+        password = request.form.get('password') or ''
+
+        if not identifier or not password:
+            return render_template_string(LOGIN_TEMPLATE, error="Please enter both username/email and password")
+
+        # Accept username OR email, case-insensitive
+        user = User.query.filter(
+            (db.func.lower(User.username) == identifier.lower()) |
+            (db.func.lower(User.email) == identifier.lower())
+        ).first()
+
         if user and bcrypt.check_password_hash(user.password, password):
             login_user(user)
+            next_page = request.args.get('next')
+            # Prevent open-redirect: only allow relative paths
+            if next_page and next_page.startswith('/') and not next_page.startswith('//'):
+                return redirect(next_page)
             return redirect(url_for('dashboard'))
-        return render_template_string(LOGIN_TEMPLATE, error="Invalid username or password")
+
+        return render_template_string(LOGIN_TEMPLATE, error="Invalid username, email, or password")
+
     return render_template_string(LOGIN_TEMPLATE, error=None)
+
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
-        username = request.form.get('username')
-        email = request.form.get('email')
-        password = request.form.get('password')
-        existing = User.query.filter_by(username=username).first()
-        if existing:
+        username = (request.form.get('username') or '').strip()
+        email = (request.form.get('email') or '').strip().lower()
+        password = request.form.get('password') or ''
+
+        if not username or not email or not password:
+            return render_template_string(REGISTER_TEMPLATE, error="All fields are required")
+        if len(password) < 6:
+            return render_template_string(REGISTER_TEMPLATE, error="Password must be at least 6 characters")
+
+        # Case-insensitive duplicate checks
+        if User.query.filter(db.func.lower(User.username) == username.lower()).first():
             return render_template_string(REGISTER_TEMPLATE, error="Username already taken")
+        if User.query.filter(db.func.lower(User.email) == email).first():
+            return render_template_string(REGISTER_TEMPLATE, error="Email already registered")
+
         hashed = bcrypt.generate_password_hash(password).decode('utf-8')
         new_user = User(username=username, email=email, password=hashed)
         db.session.add(new_user)
         db.session.commit()
         login_user(new_user)
         return redirect(url_for('dashboard'))
+
     return render_template_string(REGISTER_TEMPLATE, error=None)
+
 
 @app.route('/logout')
 @login_required
@@ -295,20 +331,26 @@ def logout():
     logout_user()
     return redirect(url_for('login'))
 
+
 @app.route('/dashboard')
 @login_required
 def dashboard():
     return render_template_string(DASHBOARD_TEMPLATE)
 
+
 @app.route('/load-sample')
 @login_required
 def load_sample():
-    # Serves the sanitized generic data
-    return SAMPLE_CSV
+    response = make_response(SAMPLE_CSV)
+    response.headers['Content-Type'] = 'text/csv; charset=utf-8'
+    response.headers['Content-Disposition'] = 'inline; filename=sample_fleet.csv'
+    return response
+
 
 @app.route('/ping')
 def ping():
     return jsonify({'status': 'ok', 'bot_name': BOT_NAME})
 
+
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=os.getenv('PORT', 5000), debug=False)
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=False)
